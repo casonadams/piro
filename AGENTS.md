@@ -79,16 +79,21 @@ The application provides two operational modes:
      - `G` / `End`: jump to bottom of feed
      - `i` / `q`: exit Scroll Mode and return to input prompt.
    - **Unified Selection Model (Maki-Style)**:
-     - **Mouse**: Left-click and drag across any text to highlight words, spans, or multi-line blocks with exact character precision. **Releasing the mouse immediately copies the text and clears the highlight** (`selection_state = None`, matching maki).
-     - **Keyboard**:
+     - **Mouse**:
+       - **Scroll Up**: Enters Scroll Mode and scrolls up into history.
+       - **Scroll Down**: Smoothly moves the feed and cursor down towards the bottom. Only scrolling *past* the bottom-most line exits Scroll Mode back to the input prompt.
+       - **Left-Click & Drag**: Highlights words, spans, or multi-line blocks with exact character precision. **Releasing the mouse immediately copies the text and clears the highlight** (`selection_state = None`, matching maki).
+     - **Keyboard Selection**:
        - Move with `h`/`j`/`k`/`l` or arrow keys with the visible hardware cursor positioned directly in the feed.
-       - Press `v` or `Space` to anchor visual selection; moving the cursor extends the highlighted span/block just like dragging with a mouse.
-       - Press `y` or `Enter` to copy to clipboard, clear the highlight, and return to the input prompt.
-       - Press `Esc` to clear selection (or exit scroll mode if not selecting).
+       - **Character Selection (`v` / `Space`)**: Anchors character/span selection; moving extends the highlighted span.
+       - **Full-Line Selection (`V` / `Shift+V`)**: Anchors full-line selection; moving extends the selection across full lines.
+       - **Yank / Copy (`y` / `Enter`)**: Copies selected text to the system clipboard (OSC 52 and macOS `pbcopy`), immediately clears the highlight, and returns to the input prompt.
+       - **Cancel (`Esc`)**: Clears the selection (or exits scroll mode if not selecting).
      - **One-Key Block Copy (`b`)**: Pressing `b` in Scroll Mode instantly copies the entire output of the current command block.
    - Footer displays:
-     - Default: ` SCROLL   [hjkl/arrows] Move  [v/Space] Select  [b] Copy block  [i/q/Esc] Return `
-     - When Selecting: ` VISUAL   [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
+     - Default: ` SCROLL   [hjkl] Move  [v] Char sel  [V] Line sel  [b] Copy block  [i/q/Esc] Return `
+     - When Selecting (Char): ` VISUAL   [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
+     - When Selecting (Line): ` VISUAL LINE   [jk/arrows] Extend lines  [y/Enter] Copy  [v/V/Esc] Cancel `
      - On copy: shows temporary ` [Copied to clipboard!] ` confirmation.
 
 ## UI & Layout Invariants

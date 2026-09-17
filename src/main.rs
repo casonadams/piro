@@ -31,7 +31,8 @@ async fn main() -> std::io::Result<()> {
 
             // Scrape buffer cells directly when a copy is triggered, then immediately clear highlight
             if app.pending_copy {
-                if let Some(sel) = app.current_selection() {
+                let max_col = feed_area.width.saturating_sub(1);
+                if let Some(sel) = app.current_selection(max_col) {
                     let text = ui::feed::extract_selection_from_buf(f.buffer_mut(), &sel, feed_area);
                     if !text.is_empty() {
                         clipboard::copy_to_clipboard(&text);
@@ -40,6 +41,9 @@ async fn main() -> std::io::Result<()> {
                 }
                 app.clear_selection();
                 app.pending_copy = false;
+                if app.exit_after_copy {
+                    app.exit_scroll_mode();
+                }
             }
         })?;
 
@@ -141,16 +145,22 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, feed_a
                 }
             }
             KeyCode::Char('u') => app.move_cursor_up(10),
-            KeyCode::Char('d') => app.move_cursor_down(10, max_row),
+            KeyCode::Char('d') => {
+                let _ = app.move_cursor_down(10, max_row);
+            }
             _ => {}
         }
         return;
     }
 
     match key.code {
-        // Toggle visual selection (like tmux 'v' / Space)
+        // Toggle character visual selection (like tmux 'v' / Space)
         KeyCode::Char('v') | KeyCode::Char(' ') => {
-            app.toggle_selection();
+            app.toggle_selection(app::SelectionType::Char);
+        }
+        // Toggle full-line visual selection (Shift+V)
+        KeyCode::Char('V') => {
+            app.toggle_selection(app::SelectionType::Line);
         }
         // Copy entire command block (convenient 1-key block copy)
         KeyCode::Char('b') => {
@@ -161,18 +171,13 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, feed_a
         }
         // Yank / Copy selected lines
         KeyCode::Char('y') | KeyCode::Enter => {
-            if app.selection_anchor.is_some() {
-                app.pending_copy = true;
-            } else {
-                // Copy current line
-                app.selection_anchor = Some(ScreenPos {
-                    col: 2,
-                    row: app.cursor_pos.row,
-                });
-                app.cursor_pos.col = max_col.saturating_sub(2);
-                app.pending_copy = true;
+            if app.selection_anchor.is_none() {
+                // If no selection was started, select the full current line!
+                app.selection_type = app::SelectionType::Line;
+                app.selection_anchor = Some(app.cursor_pos);
             }
-            app.exit_scroll_mode();
+            app.pending_copy = true;
+            app.exit_after_copy = true;
         }
         // Exit or cancel selection
         KeyCode::Esc => {
@@ -190,11 +195,15 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, feed_a
         KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
         KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, max_col),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
-        KeyCode::Down | KeyCode::Char('j') => app.move_cursor_down(1, max_row),
+        KeyCode::Down | KeyCode::Char('j') => {
+            let _ = app.move_cursor_down(1, max_row);
+        }
         KeyCode::Char('0') => app.cursor_pos.col = 2,
         KeyCode::Char('$') => app.cursor_pos.col = max_col.saturating_sub(2),
         KeyCode::PageUp => app.move_cursor_up(10),
-        KeyCode::PageDown => app.move_cursor_down(10, max_row),
+        KeyCode::PageDown => {
+            let _ = app.move_cursor_down(10, max_row);
+        }
         KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
         KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
         _ => {}
@@ -212,14 +221,17 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, feed_a
             app.move_cursor_up(2);
         }
         MouseEventKind::ScrollDown => {
-            app.move_cursor_down(2, max_row);
-            if app.scroll.auto_scroll || app.scroll.scroll_from_bottom == 0 {
-                app.exit_scroll_mode();
+            if app.mode == Mode::Scroll {
+                let past_bottom = app.move_cursor_down(2, max_row);
+                if past_bottom {
+                    app.exit_scroll_mode();
+                }
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
             if mouse.row < feed_area.bottom() {
                 app.enter_scroll_mode();
+                app.selection_type = app::SelectionType::Char;
                 let pos = ScreenPos {
                     col: mouse.column,
                     row: mouse.row,
@@ -227,6 +239,7 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, feed_a
                 app.cursor_pos = pos;
                 app.selection_anchor = Some(pos);
                 app.pending_copy = false;
+                app.exit_after_copy = false;
             }
         }
         MouseEventKind::Drag(MouseButton::Left) if app.mode == Mode::Scroll => {
@@ -238,8 +251,8 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, feed_a
         MouseEventKind::Up(MouseButton::Left) if app.mode == Mode::Scroll => {
             if let Some(anchor) = app.selection_anchor {
                 if anchor != app.cursor_pos {
-                    // Triggers scraping from frame buffer on next render, then clears selection immediately
                     app.pending_copy = true;
+                    app.exit_after_copy = false;
                 } else {
                     app.clear_selection();
                 }

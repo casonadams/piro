@@ -52,7 +52,8 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(visible), area);
 
     // Apply visual selection highlight across cells in the buffer
-    if let Some(sel) = app.current_selection() {
+    let max_col = area.width.saturating_sub(1);
+    if let Some(sel) = app.current_selection(max_col) {
         apply_selection_highlight(frame.buffer_mut(), &sel, area);
     }
 

@@ -9,6 +9,13 @@ pub enum Mode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionType {
+    #[default]
+    Char,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScreenPos {
     pub col: u16,
     pub row: u16,
@@ -200,7 +207,9 @@ pub struct App {
     pub viewport_height: usize,
     pub cursor_pos: ScreenPos,
     pub selection_anchor: Option<ScreenPos>,
+    pub selection_type: SelectionType,
     pub pending_copy: bool,
+    pub exit_after_copy: bool,
     pub copied_flash: bool,
     pub active_abort: Option<AbortHandle>,
 }
@@ -217,7 +226,9 @@ impl App {
             viewport_height: 10,
             cursor_pos: ScreenPos::default(),
             selection_anchor: None,
+            selection_type: SelectionType::Char,
             pending_copy: false,
+            exit_after_copy: false,
             copied_flash: false,
             active_abort: None,
         }
@@ -277,8 +288,8 @@ impl App {
     pub fn enter_scroll_mode(&mut self) {
         self.mode = Mode::Scroll;
         self.selection_anchor = None;
+        self.selection_type = SelectionType::Char;
         self.copied_flash = false;
-        // Position cursor on bottom-most visible row of the feed
         let row = self.viewport_height.saturating_sub(1) as u16;
         self.cursor_pos = ScreenPos { col: 2, row };
     }
@@ -286,25 +297,41 @@ impl App {
     pub fn exit_scroll_mode(&mut self) {
         self.mode = Mode::Input;
         self.selection_anchor = None;
+        self.selection_type = SelectionType::Char;
         self.pending_copy = false;
-        self.copied_flash = false;
+        self.exit_after_copy = false;
     }
 
-    pub fn toggle_selection(&mut self) {
+    pub fn toggle_selection(&mut self, sel_type: SelectionType) {
         if self.selection_anchor.is_none() {
+            self.selection_type = sel_type;
             self.selection_anchor = Some(self.cursor_pos);
         } else {
             self.selection_anchor = None;
+            self.selection_type = SelectionType::Char;
         }
     }
 
     pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
+        self.selection_type = SelectionType::Char;
     }
 
-    pub fn current_selection(&self) -> Option<TextSelection> {
-        self.selection_anchor
-            .map(|anchor| TextSelection::new(anchor, self.cursor_pos))
+    pub fn current_selection(&self, max_col: u16) -> Option<TextSelection> {
+        self.selection_anchor.map(|anchor| match self.selection_type {
+            SelectionType::Char => TextSelection::new(anchor, self.cursor_pos),
+            SelectionType::Line => {
+                let start_row = anchor.row.min(self.cursor_pos.row);
+                let end_row = anchor.row.max(self.cursor_pos.row);
+                TextSelection::new(
+                    ScreenPos { col: 2, row: start_row },
+                    ScreenPos {
+                        col: max_col.saturating_sub(2),
+                        row: end_row,
+                    },
+                )
+            }
+        })
     }
 
     pub fn move_cursor_left(&mut self, delta: u16) {
@@ -325,14 +352,24 @@ impl App {
         }
     }
 
-    pub fn move_cursor_down(&mut self, delta: u16, max_row: u16) {
-        let target = self.cursor_pos.row + delta;
-        if target <= max_row {
-            self.cursor_pos.row = target;
+    pub fn move_cursor_down(&mut self, delta: u16, max_row: u16) -> bool {
+        if self.cursor_pos.row < max_row {
+            let target = self.cursor_pos.row + delta;
+            if target <= max_row {
+                self.cursor_pos.row = target;
+            } else {
+                let overflow = target - max_row;
+                self.cursor_pos.row = max_row;
+                if self.scroll.scroll_from_bottom > 0 {
+                    self.scroll_down(overflow as usize);
+                }
+            }
+            false
+        } else if self.scroll.scroll_from_bottom > 0 {
+            self.scroll_down(delta as usize);
+            false
         } else {
-            let overflow = target - max_row;
-            self.cursor_pos.row = max_row;
-            self.scroll_down(overflow as usize);
+            true
         }
     }
 
@@ -415,22 +452,54 @@ mod tests {
         assert_eq!(app.cursor_pos.row, 19);
         assert_eq!(app.selection_anchor, None);
 
-        app.toggle_selection();
+        // Character visual selection
+        app.toggle_selection(SelectionType::Char);
         assert_eq!(app.selection_anchor, Some(ScreenPos { col: 2, row: 19 }));
 
         app.move_cursor_up(5);
         assert_eq!(app.cursor_pos.row, 14);
 
-        let sel = app.current_selection().unwrap();
+        let sel = app.current_selection(80).unwrap();
         let (start, end) = sel.normalized();
         assert_eq!(start.row, 14);
         assert_eq!(end.row, 19);
 
+        // Line visual selection (Shift+V)
+        app.toggle_selection(SelectionType::Line); // cancels current selection
+        app.toggle_selection(SelectionType::Line);
+        assert_eq!(app.selection_type, SelectionType::Line);
+
+        let line_sel = app.current_selection(80).unwrap();
+        assert_eq!(line_sel.anchor.col, 2);
+        assert_eq!(line_sel.cursor.col, 78);
+
         app.clear_selection();
         assert_eq!(app.selection_anchor, None);
-        assert_eq!(app.current_selection(), None);
+        assert_eq!(app.current_selection(80), None);
 
         app.exit_scroll_mode();
         assert_eq!(app.mode, Mode::Input);
+    }
+
+    #[test]
+    fn test_scroll_down_to_bottom_before_exit() {
+        let mut app = App::new();
+        app.total_feed_lines = 50;
+        app.viewport_height = 20;
+
+        app.enter_scroll_mode();
+        app.move_cursor_up(10);
+        assert_eq!(app.cursor_pos.row, 9);
+
+        let past = app.move_cursor_down(5, 19);
+        assert!(!past);
+        assert_eq!(app.cursor_pos.row, 14);
+
+        let past = app.move_cursor_down(10, 19);
+        assert!(!past);
+        assert_eq!(app.cursor_pos.row, 19);
+
+        let past = app.move_cursor_down(2, 19);
+        assert!(past);
     }
 }

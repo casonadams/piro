@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, SelectionType};
 
 pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.mode {
@@ -43,17 +43,25 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         Mode::Scroll => {
             if app.selection_anchor.is_some() {
+                let (badge_text, hints_text) = if app.selection_type == SelectionType::Line {
+                    (
+                        " VISUAL LINE ",
+                        " [jk/arrows] Extend lines  [y/Enter] Copy  [v/V/Esc] Cancel",
+                    )
+                } else {
+                    (
+                        " VISUAL ",
+                        " [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel",
+                    )
+                };
                 let badge = Span::styled(
-                    " VISUAL ",
+                    badge_text,
                     Style::default()
                         .bg(Color::Yellow)
                         .fg(Color::Black)
                         .add_modifier(Modifier::BOLD),
                 );
-                let hints = Span::styled(
-                    " [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel",
-                    Style::default().fg(Color::White),
-                );
+                let hints = Span::styled(hints_text, Style::default().fg(Color::White));
                 Line::from(vec![badge, hints])
             } else {
                 let badge = Span::styled(
@@ -64,7 +72,7 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                         .add_modifier(Modifier::BOLD),
                 );
                 let hints = Span::styled(
-                    " [hjkl/arrows] Move  [v/Space] Select  [b] Copy block  [i/q/Esc] Return",
+                    " [hjkl] Move  [v] Char sel  [V] Line sel  [b] Copy block  [i/q/Esc] Return",
                     Style::default().fg(Color::White),
                 );
                 let mut spans = vec![badge, hints];

@@ -1,7 +1,7 @@
 use std::io::Write;
 
 pub fn copy_to_clipboard(text: &str) {
-    // 1. Native terminal OSC 52 sequence (supported by modern terminal emulators)
+    // 1. Native terminal OSC 52 sequence
     let b64 = base64_encode(text.as_bytes());
     let osc52 = format!("\x1b]52;c;{}\x07", b64);
     let mut stdout = std::io::stdout();
@@ -15,6 +15,7 @@ pub fn copy_to_clipboard(text: &str) {
         if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
+                drop(stdin); // Flush and close stdin so pbcopy commits to clipboard
             }
             let _ = child.wait();
         }
