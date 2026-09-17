@@ -2,14 +2,18 @@
 
 ## Project Overview
 
-`tuitest` is a terminal command runner TUI built in Rust using [Ratatui](https://docs.rs/ratatui/latest/ratatui/) and [Crossterm](https://docs.rs/crossterm/latest/crossterm/). It presents a split interface inspired by the pi.dev aesthetic: an asynchronous, scrollable output feed above, an empty separator space, a clean horizontal-ruled command input prompt, and a minimal footer status bar.
+`tuitest` is a high-performance terminal command runner TUI written in Rust using [Ratatui](https://docs.rs/ratatui/latest/ratatui/) and [Crossterm](https://docs.rs/crossterm/latest/crossterm/). It delivers an asynchronous, non-blocking interface inspired by the pi.dev aesthetic:
+- A scrollable, bottom-anchored output feed above.
+- An empty space separator.
+- A horizontal-ruled command input prompt (clean lines, no side borders, no prompt symbol).
+- A minimal bottom footer status bar with integrated scrollback indicators.
 
-## Architecture & Codebase Map
+## Architectural Design & Codebase Map
 
 ```
 src/
-├── main.rs              # Application entrypoint & event loop (tokio::select!)
-├── app.rs               # Domain state machine (App, InputState, FeedItem, ScrollState)
+├── main.rs              # Entry point & async event loop (tokio::select!)
+├── app.rs               # Pure domain state machine (App, InputState, FeedItem, ScrollState)
 ├── runner.rs            # Async subprocess runner ($SHELL -c <cmd>) and stream reader
 ├── terminal.rs          # Alternate screen, raw mode, and panic recovery guard (TerminalGuard)
 └── ui/
@@ -20,64 +24,78 @@ src/
     └── footer.rs        # Bottom status indicator (READY / RUNNING) and scrollback hints
 ```
 
-### Key Components
+### Module Responsibilities
 
-- **`src/main.rs`**: Single asynchronous event loop using `tokio::select!` multiplexing `crossterm::event::EventStream`, background process output (`runner_rx`), and tick intervals. Zero unnecessary background event-forwarder threads.
+- **`src/main.rs`**: Directly multiplexes terminal events, background process messages, and timer ticks via `tokio::select!`.
+  - Avoids wrapper threads, intermediate event queues, or custom channel layers.
+  - Direct selection on `crossterm::event::EventStream`, `tokio::sync::mpsc::UnboundedReceiver<RunnerMsg>`, and `tokio::time::Interval`.
 - **`src/app.rs`**:
-  - `InputState`: UTF-8-safe text entry buffer with byte-indexed character insertion, backspace, delete, and arrow navigation.
+  - `InputState`: Lean, UTF-8-safe text entry buffer using string byte indexing. Avoids allocating `Vec<char>` on keystrokes.
   - `ScrollState`: Virtual scroll calculations with sticky auto-scroll when at the bottom, and manual scrollback offset tracking.
-  - `FeedItem`: Semantic enum containing `UserInputBlock` and `CommandOutputBlock`.
-  - `App`: Central state store managing process abort handles, input, and feed history.
-- **`src/runner.rs`**: Executes commands via `$SHELL -c` (fallback to `/bin/sh -c`), streaming stdout and stderr asynchronously while stripping raw ANSI escape sequences. Uses Tokio's native `AbortHandle` for immediate `Ctrl+C` process cancellation.
-- **`src/terminal.rs`**: RAII struct `TerminalGuard` enabling raw mode, alternate screen, and mouse capture. Installs a panic hook to guarantee terminal restoration even on unexpected panics.
-- **`src/ui/`**: Modularized presentation layer.
-  - `blocks.rs`: Renders distinct bordered cards for user input and command output with clean duration formatting (`Took 0.0s`) and exit codes (`[Exit 1]`).
-  - `feed.rs`: Computes visible slices for the feed and pushes blocks down to sit right above the input prompt.
-  - `input.rs`: Renders the input area bounded by top and bottom horizontal divider rules without prompt characters (`>`) or side borders.
-  - `footer.rs`: Renders `READY` or `RUNNING` status and active scrollback offsets.
+  - `FeedItem`: `UserInput(String)` and `CommandOutput(CommandOutputBlock)`.
+  - `App`: Central state store managing process `AbortHandle`, input state, and feed history.
+- **`src/runner.rs`**: Executes commands asynchronously via `$SHELL -c` (fallback to `/bin/sh -c`), streaming stdout and stderr line-by-line while stripping raw ANSI escape sequences. Uses Tokio's native `AbortHandle` for instant cancellation on `Ctrl+C`.
+- **`src/terminal.rs`**: RAII `TerminalGuard` enabling raw mode, alternate screen, and mouse capture. Installs a custom panic hook ensuring the terminal is restored to normal mode under all crash conditions.
+- **`src/ui/`**: Modular presentation layer.
+  - `blocks.rs`: Renders distinct bordered cards for user input and command output using reusable `box_border` and `box_line` helpers.
+  - `feed.rs`: Computes visible slices for the feed, handles line padding to anchor content at the bottom of the feed area when content is shorter than the viewport.
+  - `input.rs`: Renders the input area bounded by top and bottom horizontal divider rules with the active cursor.
+  - `footer.rs`: Renders `READY` or `RUNNING` status and active scrollback notifications.
+
+## Engineering Rigor & Size Invariants
+
+All future contributions and modifications MUST adhere to these strict size and rigor constraints:
+
+1. **Lines of Code (Tokei Budget)**:
+   - Total codebase size MUST remain under **800 lines of Rust** (`tokei -e target` < 700 lines of actual code).
+   - No single file should exceed 300 lines. Keep components modular, focused, and free of boilerplate.
+2. **Binary Footprint Budget**:
+   - Release binary size MUST remain under **1.0 MiB** (target: ~960 KiB).
+   - Verify with `cargo bloat --release --crates`.
+3. **Dependency Zero-Bloat Policy**:
+   - Do NOT add heavy or umbrella crates (e.g. use `futures-util` with `default-features = false` instead of `futures`).
+   - Do NOT re-add `chrono` or date/time parsing crates unless strictly mandated.
+   - Maintain `tokio` with minimal feature set: `["rt-multi-thread", "macros", "process", "io-util", "sync", "time"]`.
+   - Maintain `ratatui` with `default-features = false, features = ["crossterm", "std"]` to avoid transitive calendar/time dependencies.
+4. **Release Profile Configuration**:
+   - Keep `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, and `strip = true` in `[profile.release]`.
+
+## UI & Layout Invariants
+
+1. **User Input Area**:
+   - Bounded **only** by top and bottom horizontal divider rules `─...─` in `Color::DarkGray`.
+   - **No side borders** (`│`), **no corner glyphs** (`┌ ┐ └ ┘`), and **no prompt characters** (`>`).
+   - Text entry sits directly on the middle row between the two rules with the hardware cursor properly positioned.
+2. **Empty Space Separator**:
+   - Exactly 1 blank row separates the output feed from the input area's top divider rule.
+3. **Scrollback Notifications**:
+   - When scrolled up into history, the scroll offset notice is displayed in the **footer** next to `READY` (e.g. ` READY   Scrollback active: 4 lines up (PgDn / End to return)`).
+   - Never draw scroll indicator text into the input area's divider rules.
+4. **Command Output Blocks**:
+   - `$ <command>` is placed on the first row inside the block in bold white.
+   - A blank spacer row follows the command line.
+   - If a command produces no stdout/stderr, `(no output)` is rendered in dimmed text (`Color::DarkGray` + `Modifier::DIM`).
+   - If a command exits with a non-zero code, `Command exited with code <N>` is displayed in bold red followed by a blank spacer row.
+   - If a command is cancelled via `Ctrl+C`, `Command cancelled` is displayed in bold yellow followed by a blank spacer row.
+   - The final line displays `Took X.Xs` (or `Running X.Xs` while active) in dimmed text with 1-decimal-place precision (`{:.1}s`).
+5. **Right Border Alignment**:
+   - All block lines must be formatted using `fit_to_width` and `(area.width - 1)` to prevent right border clipping on terminal emulators.
 
 ## Development Workflows & Quality Gates
 
-Run these commands before submitting any changes:
+Every change must pass all four quality gates with zero warnings:
 
 ```bash
-# Format check
+# 1. Format check
 cargo fmt --check
 
-# Strict Clippy lint check
+# 2. Strict Clippy check (zero warnings permitted)
 cargo clippy -- -D warnings
 
-# Run all unit and integration tests
+# 3. Unit and integration tests
 cargo test
 
-# Build debug binary
-cargo build
-
-# Build optimized release binary
-cargo build --release
-
-# Launch application
-cargo run
+# 4. Code & binary bloat verification
+tokei -e target
+cargo bloat --release --crates
 ```
-
-## Binary Size & Optimization
-
-The project minimizes binary bloat and compile times:
-- `ratatui` is configured with `default-features = false` (`crossterm`, `std`), omitting unused widget dependencies (e.g. `widget-calendar` which pulls in the `time` crate).
-- `tokio` features are strictly pruned to `["rt-multi-thread", "macros", "process", "io-util", "sync", "time"]` (omits unused `net`, `fs`, `signal`, `tracing`, `socket2`).
-- `futures-util` with `default-features = false` is used instead of the full `futures` umbrella crate.
-- Release builds enable Fat LTO, single codegen unit, abort on panic, and binary stripping, bringing release binary size down under 1 MB.
-
-Run `cargo bloat --release --crates` to verify crate binary contributions.
-
-
-1. **User Input Area**: Bounded only by top and bottom horizontal rules `─...─` with no side borders (`│`) and no prompt symbol (`>`).
-2. **Empty Space Separator**: Exactly 1 blank row separates the output feed from the input area's top rule.
-3. **Scroll Notification**: When scrolled up into history, the scroll offset notice is displayed in the **footer** next to `READY` (e.g. ` READY   Scrollback active: 4 lines up (PgDn / End to return)`). Do not draw scroll indicator text into the input area's divider rules.
-4. **Command Output Blocks**:
-   - `$ <command>` is placed on the first row inside the block.
-   - A blank spacer line precedes and follows output lines.
-   - If a command produces no stdout/stderr, `(no output)` is rendered in dimmed text.
-   - If a command fails (non-zero exit code), `Command exited with code <N>` is displayed in bold red.
-   - The last row displays `Took X.Xs` in dimmed text with 1-decimal-place precision (e.g. `Took 0.0s` or `Took 12.5s`).
-5. **Right Border Alignment**: All block lines must be sized with `fit_to_width` using `unicode-width` and `(area.width - 1)` to prevent right border clipping in terminal emulators.
