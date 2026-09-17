@@ -23,27 +23,21 @@ impl OllamaProvider {
     fn format_messages(&self, history: &[AgentMessage]) -> Vec<Value> {
         history
             .iter()
-            .map(|msg| match msg {
-                AgentMessage::User(u) => json!({ "role": "user", "content": u }),
-                AgentMessage::Thought(t) => {
-                    json!({ "role": "assistant", "content": "", "thinking": t })
-                }
-                AgentMessage::ToolCall { name, input } => {
-                    json!({
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [{
-                            "function": {
-                                "name": name,
-                                "arguments": { "command": input }
-                            }
-                        }]
-                    })
-                }
-                AgentMessage::Observation { output, .. } => {
-                    json!({ "role": "tool", "content": output })
-                }
-                AgentMessage::Response(r) => json!({ "role": "assistant", "content": r }),
+            .filter_map(|msg| match msg {
+                AgentMessage::User(u) => Some(json!({ "role": "user", "content": u })),
+                AgentMessage::Thought(_) => None,
+                AgentMessage::ToolCall { name, input } => Some(json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "function": {
+                            "name": name,
+                            "arguments": { "command": input }
+                        }
+                    }]
+                })),
+                AgentMessage::Observation { output, .. } => Some(json!({ "role": "tool", "content": output })),
+                AgentMessage::Response(r) => Some(json!({ "role": "assistant", "content": r })),
             })
             .collect()
     }
@@ -97,6 +91,10 @@ fn parse_tool_calls(val: &Value) -> Vec<ToolCallRequest> {
 }
 
 fn parse_ollama_response(val: Value) -> Result<LlmResponse, String> {
+    if let Some(err) = val.get("error").and_then(Value::as_str) {
+        return Err(format!("Ollama error: {}", err));
+    }
+
     let msg = val
         .get("message")
         .ok_or_else(|| "Ollama response missing 'message'".to_string())?;
@@ -212,11 +210,10 @@ mod tests {
             },
         ];
         let msgs = provider.format_messages(&history);
-        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0]["role"], "user");
-        assert_eq!(msgs[1]["thinking"], "pondering");
-        assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "bash");
-        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[1]["tool_calls"][0]["function"]["name"], "bash");
+        assert_eq!(msgs[2]["role"], "tool");
 
         let tools = vec![ToolDefinition {
             name: "bash",

@@ -24,6 +24,7 @@ pub struct ProviderBackend<P> {
     provider: P,
     tools: Vec<ToolDefinition>,
     pending_tool_call: Option<ToolCallRequest>,
+    pending_final_answer: Option<String>,
 }
 
 impl<P: LlmProvider> ProviderBackend<P> {
@@ -32,6 +33,7 @@ impl<P: LlmProvider> ProviderBackend<P> {
             provider,
             tools,
             pending_tool_call: None,
+            pending_final_answer: None,
         }
     }
 }
@@ -45,12 +47,18 @@ impl<P: LlmProvider> AgentBackend for ProviderBackend<P> {
             });
         }
 
+        if let Some(ans) = self.pending_final_answer.take() {
+            return Ok(StepResult::FinalAnswer(ans));
+        }
+
         let resp = self.provider.chat(history, &self.tools).await?;
 
         if let Some(thought) = resp.thinking {
             let mut calls = resp.tool_calls;
             if !calls.is_empty() {
                 self.pending_tool_call = Some(calls.remove(0));
+            } else if let Some(content) = resp.content {
+                self.pending_final_answer = Some(content);
             }
             return Ok(StepResult::Thought(thought));
         }

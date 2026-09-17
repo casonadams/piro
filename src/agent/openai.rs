@@ -25,28 +25,22 @@ impl OpenAiProvider {
     fn format_messages(&self, history: &[AgentMessage]) -> Vec<Value> {
         history
             .iter()
-            .map(|msg| match msg {
-                AgentMessage::User(u) => json!({ "role": "user", "content": u }),
-                AgentMessage::Thought(t) => {
-                    json!({ "role": "assistant", "content": format!("<think>{}</think>", t) })
-                }
-                AgentMessage::ToolCall { name, input } => {
-                    json!({
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": format!("call_{}", name),
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": json!({ "command": input }).to_string()
-                            }
-                        }]
-                    })
-                }
-                AgentMessage::Observation { output, .. } => {
-                    json!({ "role": "tool", "content": output })
-                }
-                AgentMessage::Response(r) => json!({ "role": "assistant", "content": r }),
+            .filter_map(|msg| match msg {
+                AgentMessage::User(u) => Some(json!({ "role": "user", "content": u })),
+                AgentMessage::Thought(_) => None,
+                AgentMessage::ToolCall { name, input } => Some(json!({
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": format!("call_{}", name),
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": json!({ "command": input }).to_string()
+                        }
+                    }]
+                })),
+                AgentMessage::Observation { output, .. } => Some(json!({ "role": "tool", "content": output })),
+                AgentMessage::Response(r) => Some(json!({ "role": "assistant", "content": r })),
             })
             .collect()
     }
