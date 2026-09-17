@@ -2,7 +2,34 @@ use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::agent::AgentHandle;
 use crate::runner::ProcessHandle;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputIntent {
+    DirectCommand(String),
+    CommandWithAgent(String),
+    AgentPrompt(String),
+}
+
+pub fn parse_input_intent(input: &str) -> Option<InputIntent> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(cmd) = trimmed.strip_prefix("!!") {
+        let cmd = cmd.trim();
+        if !cmd.is_empty() {
+            return Some(InputIntent::DirectCommand(cmd.to_string()));
+        }
+    } else if let Some(cmd) = trimmed.strip_prefix('!') {
+        let cmd = cmd.trim();
+        if !cmd.is_empty() {
+            return Some(InputIntent::CommandWithAgent(cmd.to_string()));
+        }
+    }
+    Some(InputIntent::AgentPrompt(trimmed.to_string()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -222,6 +249,8 @@ pub struct App {
     pub history_idx: Option<usize>,
     pub draft_input: String,
     pub active_process: Option<ProcessHandle>,
+    pub active_agent: Option<AgentHandle>,
+    pub pending_agent_cmd: Option<String>,
 }
 
 impl App {
@@ -242,6 +271,8 @@ impl App {
             history_idx: None,
             draft_input: String::new(),
             active_process: None,
+            active_agent: None,
+            pending_agent_cmd: None,
         };
         app.load_history();
         app
@@ -280,16 +311,28 @@ impl App {
         self.active_process.is_some()
     }
 
-    pub fn add_command(&mut self, cmd: String, h: ProcessHandle) {
-        if self.history.last().map(|s| s.as_str()) != Some(&cmd) {
+    pub fn is_agent_running(&self) -> bool {
+        self.active_agent.is_some()
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.is_command_running() || self.is_agent_running()
+    }
+
+    pub fn record_history(&mut self, input: &str) {
+        if self.history.last().map(|s| s.as_str()) != Some(input) {
             if self.history.len() >= 1000 {
                 self.history.remove(0);
             }
-            self.history.push(cmd.clone());
-            Self::save_history(&cmd);
+            self.history.push(input.to_string());
+            Self::save_history(input);
         }
         self.history_idx = None;
         self.draft_input.clear();
+    }
+
+    pub fn add_command(&mut self, cmd: String, h: ProcessHandle) {
+        self.record_history(&cmd);
         self.feed.push(FeedItem::UserInput(cmd.clone()));
         self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command: cmd,
@@ -302,6 +345,67 @@ impl App {
         self.active_process = Some(h);
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
+    }
+
+    pub fn add_agent_prompt(&mut self, prompt: String, handle: AgentHandle) {
+        self.record_history(&prompt);
+        self.feed.push(FeedItem::UserInput(prompt));
+        self.active_agent = Some(handle);
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
+    }
+
+    pub fn add_agent_thought(&mut self, thought: String) {
+        self.feed.push(FeedItem::AgentThought(thought));
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
+    }
+
+    pub fn start_agent_tool(&mut self, name: String, input: String) {
+        self.feed.push(FeedItem::ToolCall {
+            name,
+            input: input.clone(),
+            block: CommandOutputBlock {
+                command: input,
+                status: CommandStatus::Running,
+                lines: Vec::new(),
+                started_at: Instant::now(),
+                duration: None,
+                expanded: false,
+            },
+        });
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
+    }
+
+    pub fn append_agent_tool_line(&mut self, line: String) {
+        if let Some(FeedItem::ToolCall { block, .. }) = self.feed.last_mut() {
+            if block.lines.len() >= 5000 {
+                block.lines.remove(0);
+            }
+            block.lines.push(line);
+        }
+    }
+
+    pub fn complete_agent_tool(&mut self, success: bool, exit_code: Option<i32>, duration: Duration) {
+        if let Some(FeedItem::ToolCall { block, .. }) = self.feed.last_mut() {
+            block.duration = Some(duration);
+            block.status = if success {
+                CommandStatus::Success(exit_code.unwrap_or(0))
+            } else {
+                CommandStatus::Failed(exit_code.unwrap_or(1))
+            };
+        }
+    }
+
+    pub fn add_agent_response(&mut self, response: String) {
+        self.feed.push(FeedItem::AgentResponse(response));
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
+    }
+
+    pub fn finish_agent(&mut self) {
+        self.active_agent = None;
     }
 
     pub fn append_output_line(&mut self, line: String) {
@@ -338,6 +442,11 @@ impl App {
     }
 
     pub fn cancel_active(&mut self) -> bool {
+        let mut cancelled = false;
+        if let Some(agent) = self.active_agent.take() {
+            agent.cancel();
+            cancelled = true;
+        }
         if let Some(mut h) = self.active_process.take() {
             h.kill();
             match self.feed.last_mut() {
@@ -347,10 +456,9 @@ impl App {
                 }
                 _ => {}
             }
-            true
-        } else {
-            false
+            cancelled = true;
         }
+        cancelled
     }
 
     pub fn enter_scroll_mode(&mut self) {
@@ -544,5 +652,23 @@ mod tests {
         assert_eq!(app.cursor.line, 44);
         let (s, e) = app.normalized_selection().unwrap();
         assert_eq!((s.line, e.line), (44, 49));
+    }
+
+    #[test]
+    fn test_parse_input_intent() {
+        assert_eq!(parse_input_intent(""), None);
+        assert_eq!(parse_input_intent("   "), None);
+        assert_eq!(
+            parse_input_intent("!!ls -la"),
+            Some(InputIntent::DirectCommand("ls -la".into()))
+        );
+        assert_eq!(
+            parse_input_intent("!git status"),
+            Some(InputIntent::CommandWithAgent("git status".into()))
+        );
+        assert_eq!(
+            parse_input_intent("How many files are in this directory?"),
+            Some(InputIntent::AgentPrompt("How many files are in this directory?".into()))
+        );
     }
 }

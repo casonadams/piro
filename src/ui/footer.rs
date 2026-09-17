@@ -11,7 +11,9 @@ use crate::app::{App, Mode, SelectionType};
 pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.mode {
         Mode::Input => {
-            let (lbl, col) = if app.is_command_running() {
+            let (lbl, col) = if app.is_agent_running() {
+                (" THINKING ", Color::Magenta)
+            } else if app.is_command_running() {
                 (" RUNNING ", Color::Yellow)
             } else {
                 (" READY ", Color::Green)
@@ -75,4 +77,17 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     };
 
     frame.render_widget(Paragraph::new(line).style(Style::default().bg(Color::Black)), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_footer_badges() {
+        let app = App::new();
+        assert!(!app.is_agent_running());
+        assert!(!app.is_command_running());
+        assert!(!app.is_busy());
+    }
 }
