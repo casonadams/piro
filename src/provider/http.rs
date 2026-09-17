@@ -26,13 +26,3 @@ pub async fn post_request(req: HttpRequest<'_>) -> Result<Response, String> {
 
     builder.send().await.map_err(|e| format!("HTTP POST error: {}", e))
 }
-
-pub async fn post_json(req: HttpRequest<'_>) -> Result<String, String> {
-    let res = post_request(req).await?;
-    if !res.status().is_success() {
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("HTTP error {}: {}", status, body));
-    }
-    res.text().await.map_err(|e| format!("Failed to read response: {}", e))
-}

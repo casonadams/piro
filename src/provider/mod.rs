@@ -1,5 +1,4 @@
 pub mod http;
-pub mod ollama;
 pub mod openai;
 
 #[cfg(test)]
@@ -10,7 +9,6 @@ use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
 use crate::agent::react::{AgentEvent, ToolCallRequest};
 use crate::agent::tool::{ToolDefinition, ToolRegistry};
 
-pub use ollama::OllamaProvider;
 pub use openai::{OpenAiConfig, OpenAiProvider};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -106,14 +104,12 @@ impl<P: LlmProvider> AgentBackend for ProviderBackend<P> {
 }
 
 pub enum AnyProvider {
-    Ollama(OllamaProvider),
     OpenAi(OpenAiProvider),
 }
 
 impl LlmProvider for AnyProvider {
     async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
         match self {
-            Self::Ollama(p) => p.chat_stream(params).await,
             Self::OpenAi(p) => p.chat_stream(params).await,
         }
     }
@@ -138,36 +134,54 @@ pub fn parse_model_spec(spec: &str) -> ModelSpec<'_> {
     }
 }
 
+fn resolve_provider_config(provider: &str, model: &str) -> Result<OpenAiConfig, String> {
+    match provider {
+        "ollama" => {
+            let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".into());
+            Ok(OpenAiConfig {
+                base_url: format!("{}/v1", host.trim_end_matches('/')),
+                model: model.into(),
+                api_key: None,
+            })
+        }
+        "openai" => {
+            let key = std::env::var("OPENAI_API_KEY").ok();
+            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
+            Ok(OpenAiConfig {
+                base_url,
+                model: model.into(),
+                api_key: key,
+            })
+        }
+        "openrouter" => Ok(OpenAiConfig {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            model: model.into(),
+            api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+        }),
+        "deepseek" => Ok(OpenAiConfig {
+            base_url: "https://api.deepseek.com/v1".into(),
+            model: model.into(),
+            api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
+        }),
+        "groq" => Ok(OpenAiConfig {
+            base_url: "https://api.groq.com/openai/v1".into(),
+            model: model.into(),
+            api_key: std::env::var("GROQ_API_KEY").ok(),
+        }),
+        unsupported => Err(format!(
+            "Unsupported provider '{}'. Supported providers: 'ollama', 'openai', 'openrouter', 'deepseek', 'groq'",
+            unsupported
+        )),
+    }
+}
+
 pub fn provider_from_spec(spec: &str) -> Result<AnyProvider, String> {
     let parsed = parse_model_spec(spec);
     if parsed.model.is_empty() {
         return Err("Model name cannot be empty".into());
     }
-    match parsed.provider.to_lowercase().as_str() {
-        "ollama" => {
-            if let Ok(host) = std::env::var("OLLAMA_HOST") {
-                Ok(AnyProvider::Ollama(OllamaProvider::with_base_url(
-                    host,
-                    parsed.model.into(),
-                )))
-            } else {
-                Ok(AnyProvider::Ollama(OllamaProvider::new(parsed.model.into())))
-            }
-        }
-        "openai" => {
-            let key = std::env::var("OPENAI_API_KEY").ok();
-            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-            Ok(AnyProvider::OpenAi(OpenAiProvider::new(OpenAiConfig {
-                base_url,
-                model: parsed.model.into(),
-                api_key: key,
-            })))
-        }
-        unsupported => Err(format!(
-            "Unsupported provider '{}'. Supported providers: 'ollama', 'openai'",
-            unsupported
-        )),
-    }
+    let config = resolve_provider_config(parsed.provider.to_lowercase().as_str(), parsed.model)?;
+    Ok(AnyProvider::OpenAi(OpenAiProvider::new(config)))
 }
 
 pub fn create_backend(spec: &str, registry: &ToolRegistry) -> Result<ProviderBackend<AnyProvider>, String> {
@@ -177,7 +191,13 @@ pub fn create_backend(spec: &str, registry: &ToolRegistry) -> Result<ProviderBac
 
 pub fn default_provider() -> AnyProvider {
     let spec = std::env::var("PIRO_MODEL").unwrap_or_else(|_| "ollama/ornith-1.5:35b".into());
-    provider_from_spec(&spec).unwrap_or_else(|_| AnyProvider::Ollama(OllamaProvider::new("ornith-1.5:35b".into())))
+    provider_from_spec(&spec).unwrap_or_else(|_| {
+        AnyProvider::OpenAi(OpenAiProvider::new(OpenAiConfig {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "ornith-1.5:35b".into(),
+            api_key: None,
+        }))
+    })
 }
 
 pub fn default_backend(registry: &ToolRegistry) -> ProviderBackend<AnyProvider> {
@@ -313,5 +333,16 @@ mod tests {
         let default_prov = parse_model_spec("gpt-4o");
         assert_eq!(default_prov.provider, "ollama");
         assert_eq!(default_prov.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_provider_from_spec_routing() {
+        assert!(provider_from_spec("ollama/ornith-1.5:35b").is_ok());
+        assert!(provider_from_spec("openai/gpt-4o").is_ok());
+        assert!(provider_from_spec("deepseek/deepseek-chat").is_ok());
+        assert!(provider_from_spec("openrouter/auto").is_ok());
+        assert!(provider_from_spec("groq/llama-3").is_ok());
+        assert!(provider_from_spec("unsupported/xyz").is_err());
+        assert!(provider_from_spec("").is_err());
     }
 }
