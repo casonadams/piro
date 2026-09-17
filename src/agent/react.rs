@@ -7,15 +7,15 @@ use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
 use crate::agent::tool::{Tool, ToolRegistry, ToolResult};
 use crate::runner::ProcessHandle;
 
-pub const MAX_AGENT_STEPS: usize = 10;
-
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Thought(String),
+    ThoughtDelta(String),
     ToolStart { name: String, input: String },
     ToolOutput(String),
     ToolDone { exit_code: Option<i32>, duration: Duration },
     Response(String),
+    ResponseDelta(String),
     Finished,
     Cancelled,
     Error(String),
@@ -34,6 +34,14 @@ impl AgentHandle {
             h.kill();
         }
         self.abort_handle.abort();
+    }
+
+    #[cfg(test)]
+    pub fn mock(abort_handle: AbortHandle) -> Self {
+        Self {
+            abort_handle,
+            active_tool: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -96,6 +104,24 @@ struct EngineLoopState<'a, H> {
     history: &'a mut Vec<AgentMessage>,
 }
 
+const MAX_OBSERVATION_LINES: usize = 200;
+const HEAD_LINES: usize = 120;
+const TAIL_LINES: usize = 80;
+
+pub fn truncate_observation_output(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().collect();
+    if lines.len() <= MAX_OBSERVATION_LINES {
+        return output.to_string();
+    }
+    let omitted = lines.len() - HEAD_LINES - TAIL_LINES;
+    let mut truncated = Vec::with_capacity(MAX_OBSERVATION_LINES + 1);
+    truncated.extend_from_slice(&lines[..HEAD_LINES]);
+    let notice = format!("... [output truncated: {} lines omitted] ...", omitted);
+    truncated.push(&notice);
+    truncated.extend_from_slice(&lines[lines.len() - TAIL_LINES..]);
+    truncated.join("\n")
+}
+
 async fn dispatch_tool<H: ReActHooks>(
     call: ToolCallRequest,
     ctx: &AgentContext,
@@ -135,7 +161,7 @@ async fn dispatch_tool<H: ReActHooks>(
     };
     st.hooks.after_tool(&call, &res);
     st.history.push(AgentMessage::Observation {
-        output: res.output,
+        output: truncate_observation_output(&res.output),
         success: res.success,
     });
     false
@@ -175,6 +201,64 @@ impl<B: AgentBackend + 'static> ReActEngine<B, NoopHooks> {
     }
 }
 
+pub const DEFAULT_MAX_AGENT_STEPS: usize = 1000;
+
+pub fn resolved_max_steps() -> Option<usize> {
+    match std::env::var("PIRO_MAX_STEPS") {
+        Ok(val) => match val.trim().to_lowercase().as_str() {
+            "0" | "none" | "unlimited" | "infinite" => None,
+            s => s.parse::<usize>().ok().or(Some(DEFAULT_MAX_AGENT_STEPS)),
+        },
+        Err(_) => Some(DEFAULT_MAX_AGENT_STEPS),
+    }
+}
+
+pub struct EngineSpawnOptions {
+    pub prompt: String,
+    pub history: Vec<AgentMessage>,
+    pub agent_tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+struct EngineRunParams<B, H> {
+    backend: B,
+    registry: ToolRegistry,
+    hooks: H,
+    history: Vec<AgentMessage>,
+}
+
+async fn run_engine_loop<B: AgentBackend, H: ReActHooks>(mut p: EngineRunParams<B, H>, ctx: AgentContext) {
+    let max_steps = resolved_max_steps();
+    let mut steps_taken = 0;
+
+    loop {
+        if let Some(limit) = max_steps
+            && steps_taken >= limit
+        {
+            let msg = format!("Reached maximum step limit ({} steps).", limit);
+            let _ = ctx.agent_tx.send(AgentEvent::Response(msg));
+            break;
+        }
+        steps_taken += 1;
+        p.hooks.before_step(&p.history);
+        let next = match p.backend.next_step(&p.history).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ctx.agent_tx.send(AgentEvent::Error(e));
+                break;
+            }
+        };
+        let mut st = EngineLoopState {
+            registry: &p.registry,
+            hooks: &mut p.hooks,
+            history: &mut p.history,
+        };
+        if handle_engine_step(next, &ctx, &mut st).await {
+            break;
+        }
+    }
+    let _ = ctx.agent_tx.send(AgentEvent::Finished);
+}
+
 impl<B: AgentBackend + 'static, H: ReActHooks> ReActEngine<B, H> {
     pub fn with_hooks(backend: B, registry: ToolRegistry, hooks: H) -> Self {
         Self {
@@ -184,44 +268,36 @@ impl<B: AgentBackend + 'static, H: ReActHooks> ReActEngine<B, H> {
         }
     }
 
-    pub fn spawn(self, prompt: String, agent_tx: mpsc::UnboundedSender<AgentEvent>) -> AgentHandle {
+    pub fn spawn_with_options(self, opts: EngineSpawnOptions) -> AgentHandle {
         let active_tool = Arc::new(Mutex::new(None));
         let ctx = AgentContext {
             active_tool: active_tool.clone(),
-            agent_tx,
+            agent_tx: opts.agent_tx,
         };
 
-        let task = tokio::spawn(async move {
-            let mut backend = self.backend;
-            let mut hooks = self.hooks;
-            let _tools = self.registry.format_descriptions();
-            let mut history = vec![AgentMessage::User(prompt)];
-
-            for _ in 0..MAX_AGENT_STEPS {
-                hooks.before_step(&history);
-                let next = match backend.next_step(&history).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = ctx.agent_tx.send(AgentEvent::Error(e));
-                        break;
-                    }
-                };
-                let mut st = EngineLoopState {
-                    registry: &self.registry,
-                    hooks: &mut hooks,
-                    history: &mut history,
-                };
-                if handle_engine_step(next, &ctx, &mut st).await {
-                    break;
-                }
-            }
-            let _ = ctx.agent_tx.send(AgentEvent::Finished);
-        });
+        let mut history = opts.history;
+        history.push(AgentMessage::User(opts.prompt));
+        let params = EngineRunParams {
+            backend: self.backend,
+            registry: self.registry,
+            hooks: self.hooks,
+            history,
+        };
+        let task = tokio::spawn(run_engine_loop(params, ctx));
 
         AgentHandle {
             abort_handle: task.abort_handle(),
             active_tool,
         }
+    }
+
+    #[cfg(test)]
+    pub fn spawn(self, prompt: String, agent_tx: mpsc::UnboundedSender<AgentEvent>) -> AgentHandle {
+        self.spawn_with_options(EngineSpawnOptions {
+            prompt,
+            history: Vec::new(),
+            agent_tx,
+        })
     }
 }
 
@@ -310,5 +386,52 @@ mod tests {
             AgentEvent::Error(err) => err.contains("blocked by policy"),
             _ => false,
         }));
+    }
+
+    #[test]
+    fn test_truncate_observation_output() {
+        let short = "line 1\nline 2";
+        assert_eq!(truncate_observation_output(short), short);
+
+        let long = (0..300).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let truncated = truncate_observation_output(&long);
+        let lines: Vec<&str> = truncated.lines().collect();
+        assert_eq!(lines.len(), 201);
+        assert_eq!(lines[0], "line 0");
+        assert_eq!(lines[119], "line 119");
+        assert_eq!(lines[120], "... [output truncated: 100 lines omitted] ...");
+        assert_eq!(lines[121], "line 220");
+        assert_eq!(lines[200], "line 299");
+    }
+
+    #[tokio::test]
+    async fn test_react_engine_with_prior_history() {
+        let registry = ToolRegistry::with_defaults();
+        let backend = MockAgentBackend::from_steps(vec![StepResult::FinalAnswer("Got it".into())]);
+        let engine = ReActEngine::new(backend, registry);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let prior = vec![
+            AgentMessage::User("first turn".into()),
+            AgentMessage::Response("first answer".into()),
+        ];
+        let _handle = engine.spawn_with_options(EngineSpawnOptions {
+            prompt: "second turn".into(),
+            history: prior,
+            agent_tx: tx,
+        });
+
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            let fin = matches!(ev, AgentEvent::Finished);
+            events.push(ev);
+            if fin {
+                break;
+            }
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Response(r) if r == "Got it"))
+        );
     }
 }

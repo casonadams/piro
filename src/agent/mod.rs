@@ -8,14 +8,14 @@ pub mod tool;
 
 use tokio::sync::mpsc;
 
-pub use backend::AgentBackend;
 #[cfg(test)]
 pub use backend::MockAgentBackend;
+pub use backend::{AgentBackend, AgentMessage};
 pub use ollama::OllamaProvider;
 pub use openai::{OpenAiConfig, OpenAiProvider};
-pub use provider::{LlmProvider, LlmResponse, ProviderBackend};
-pub use react::{AgentEvent, AgentHandle, ReActEngine};
-pub use tool::{ToolDefinition, ToolRegistry};
+pub use provider::{ChatRequestParams, LlmProvider, LlmResponse, ProviderBackend};
+pub use react::{AgentEvent, AgentHandle, EngineSpawnOptions, ReActEngine};
+pub use tool::ToolRegistry;
 
 pub enum AnyProvider {
     Ollama(OllamaProvider),
@@ -23,10 +23,10 @@ pub enum AnyProvider {
 }
 
 impl LlmProvider for AnyProvider {
-    async fn chat(&self, history: &[backend::AgentMessage], tools: &[ToolDefinition]) -> Result<LlmResponse, String> {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
         match self {
-            Self::Ollama(p) => p.chat(history, tools).await,
-            Self::OpenAi(p) => p.chat(history, tools).await,
+            Self::Ollama(p) => p.chat_stream(params).await,
+            Self::OpenAi(p) => p.chat_stream(params).await,
         }
     }
 }
@@ -96,6 +96,7 @@ pub struct AgentConfig<B> {
     pub prompt: String,
     pub backend: B,
     pub registry: ToolRegistry,
+    pub history: Vec<AgentMessage>,
 }
 
 pub fn default_backend(registry: &ToolRegistry) -> ProviderBackend<AnyProvider> {
@@ -107,7 +108,11 @@ pub fn spawn_agent<B: AgentBackend + 'static>(
     agent_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> AgentHandle {
     let engine = ReActEngine::new(config.backend, config.registry);
-    engine.spawn(config.prompt, agent_tx)
+    engine.spawn_with_options(EngineSpawnOptions {
+        prompt: config.prompt,
+        history: config.history,
+        agent_tx,
+    })
 }
 
 #[cfg(test)]
@@ -131,6 +136,7 @@ mod tests {
             prompt: "count files".into(),
             backend,
             registry,
+            history: Vec::new(),
         };
         let _handle = spawn_agent(config, tx);
 
@@ -164,6 +170,7 @@ mod tests {
             prompt: "task".into(),
             backend,
             registry,
+            history: Vec::new(),
         };
         let handle = spawn_agent(config, tx);
         while let Some(ev) = rx.recv().await {

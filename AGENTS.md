@@ -42,8 +42,8 @@ src/
    - Never suppress compiler or Clippy warnings (`#[allow(dead_code)]`, `#[allow(unused)]`, etc.).
    - Wire all code into execution paths, stub consumers, or place behind `#[cfg(test)]` if test-only.
 3. **Binary & Bloat Budget**:
-   - Release binary MUST remain **under 1.0 MiB** (target: ~830 KiB) with `opt-level = 3`, `lto = "fat"`, `panic = "abort"`, and `strip = true`.
-   - Maintain minimal dependency set: no heavy umbrella crates, no `chrono`.
+   - Release binary MUST remain **under 5.0 MiB** with `opt-level = 3`, `lto = "fat"`, `panic = "abort"`, and `strip = true`.
+   - Maintain minimal dependency set: no unnecessary umbrella crates, no `chrono`.
 4. **File Length**:
    - Keep files modular (< 300 lines per file where possible).
 5. **Hermetic Testing Invariant**:

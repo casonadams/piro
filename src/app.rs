@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::agent::AgentHandle;
+use crate::agent::{AgentHandle, AgentMessage};
 use crate::runner::ProcessHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +256,7 @@ pub struct App {
     pub active_agent: Option<AgentHandle>,
     pub pending_agent_cmd: Option<String>,
     pub model_spec: String,
+    pub agent_history: Vec<AgentMessage>,
 }
 
 impl App {
@@ -284,6 +285,7 @@ impl App {
             active_agent: None,
             pending_agent_cmd: None,
             model_spec,
+            agent_history: Vec::new(),
         };
         app.load_history();
         app
@@ -369,14 +371,45 @@ impl App {
 
     pub fn add_agent_prompt(&mut self, prompt: String, handle: AgentHandle) {
         self.record_history(&prompt);
+        self.agent_history.push(AgentMessage::User(prompt.clone()));
         self.feed.push(FeedItem::UserInput(prompt));
         self.active_agent = Some(handle);
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
     }
 
+    pub fn clear_feed_and_agent_context(&mut self) {
+        self.feed.clear();
+        self.agent_history.clear();
+        self.scroll_to_bottom();
+    }
+
+    pub fn append_agent_thought_delta(&mut self, delta: String) {
+        if let Some(FeedItem::AgentThought(text)) = self.feed.last_mut() {
+            text.push_str(&delta);
+        } else {
+            self.feed.push(FeedItem::AgentThought(delta));
+        }
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
+    }
+
+    pub fn append_agent_response_delta(&mut self, delta: String) {
+        if let Some(FeedItem::AgentResponse(text)) = self.feed.last_mut() {
+            text.push_str(&delta);
+        } else {
+            self.feed.push(FeedItem::AgentResponse(delta));
+        }
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
+    }
+
     pub fn add_agent_thought(&mut self, thought: String) {
-        self.feed.push(FeedItem::AgentThought(thought));
+        if let Some(FeedItem::AgentThought(text)) = self.feed.last_mut() {
+            *text = thought;
+        } else {
+            self.feed.push(FeedItem::AgentThought(thought));
+        }
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
     }
@@ -396,7 +429,11 @@ impl App {
     }
 
     pub fn add_agent_response(&mut self, response: String) {
-        self.feed.push(FeedItem::AgentResponse(response));
+        if let Some(FeedItem::AgentResponse(text)) = self.feed.last_mut() {
+            *text = response;
+        } else {
+            self.feed.push(FeedItem::AgentResponse(response));
+        }
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
     }
@@ -653,5 +690,19 @@ mod tests {
             parse_input_intent("How many files are in this directory?"),
             Some(InputIntent::AgentPrompt("How many files are in this directory?".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn test_agent_history_accumulation_and_clear() {
+        let mut app = App::default();
+        assert!(app.agent_history.is_empty());
+        let h = AgentHandle::mock(tokio::spawn(async {}).abort_handle());
+        app.add_agent_prompt("test prompt".into(), h);
+        assert_eq!(app.agent_history.len(), 1);
+        assert_eq!(app.agent_history[0], AgentMessage::User("test prompt".into()));
+
+        app.clear_feed_and_agent_context();
+        assert!(app.agent_history.is_empty());
+        assert!(app.feed.is_empty());
     }
 }

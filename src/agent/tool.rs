@@ -107,6 +107,7 @@ impl ToolRegistry {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn format_descriptions(&self) -> String {
         self.definitions()
             .iter()
@@ -126,6 +127,7 @@ mod tests {
         let tool = registry.get("bash").expect("bash tool missing");
         assert_eq!(tool.name(), "bash");
         assert!(!tool.description().is_empty());
+        assert!(registry.format_descriptions().contains("bash"));
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let run = tool.run("echo 'tool test output'", tx);

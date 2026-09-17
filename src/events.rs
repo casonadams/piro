@@ -46,6 +46,10 @@ pub fn submit_input(
     agent_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) {
     let val = app.input.take_value();
+    if val.trim() == "/clear" {
+        app.clear_feed_and_agent_context();
+        return;
+    }
     let Some(intent) = parse_input_intent(&val) else {
         return;
     };
@@ -64,11 +68,13 @@ pub fn submit_input(
         InputIntent::AgentPrompt(prompt) => {
             let registry = ToolRegistry::with_defaults();
             let backend = crate::agent::create_backend(&app.model_spec, &registry)
-                .unwrap_or_else(|_| crate::agent::default_backend(&registry));
+                .unwrap_or_else(|_| crate::agent::default_backend(&registry))
+                .with_delta_tx(agent_tx.clone());
             let config = crate::agent::AgentConfig {
                 prompt: prompt.clone(),
                 backend,
                 registry,
+                history: app.agent_history.clone(),
             };
             let handle = spawn_agent(config, agent_tx.clone());
             app.add_agent_prompt(prompt, handle);
@@ -90,8 +96,7 @@ fn handle_input_ctrl(app: &mut App, code: KeyCode, ctx: &mut InputCtx) {
             }
         }
         KeyCode::Char('l') => {
-            app.feed.clear();
-            app.scroll_to_bottom();
+            app.clear_feed_and_agent_context();
         }
         KeyCode::Char('s') => app.enter_scroll_mode(),
         KeyCode::Char('o') => app.toggle_expand(),

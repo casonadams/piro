@@ -126,13 +126,16 @@ fn handle_runner_msg(app: &mut App, msg: RunnerMsg, agent_tx: &mpsc::UnboundedSe
                     })
                     .unwrap_or_default();
                 let prompt = format!("Executed '{}'. Output:\n{}", cmd, output);
+                app.agent_history.push(agent::AgentMessage::User(prompt.clone()));
                 let registry = ToolRegistry::with_defaults();
                 let backend = agent::create_backend(&app.model_spec, &registry)
-                    .unwrap_or_else(|_| agent::default_backend(&registry));
+                    .unwrap_or_else(|_| agent::default_backend(&registry))
+                    .with_delta_tx(agent_tx.clone());
                 let config = AgentConfig {
                     prompt,
                     backend,
                     registry,
+                    history: app.agent_history.clone(),
                 };
                 let handle = spawn_agent(config, agent_tx.clone());
                 app.active_agent = Some(handle);
@@ -141,15 +144,45 @@ fn handle_runner_msg(app: &mut App, msg: RunnerMsg, agent_tx: &mpsc::UnboundedSe
     }
 }
 
+fn handle_tool_done(app: &mut App, exit_code: Option<i32>, duration: Duration) {
+    let output = app
+        .feed
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            FeedItem::CommandOutput(b) => Some(b.lines.join("\n")),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let truncated = agent::react::truncate_observation_output(&output);
+    app.agent_history.push(agent::AgentMessage::Observation {
+        output: truncated,
+        success: exit_code == Some(0),
+    });
+    app.complete_command(exit_code, duration);
+}
+
 fn handle_agent_event(app: &mut App, event: AgentEvent) {
     match event {
-        AgentEvent::Thought(thought) => app.add_agent_thought(thought),
-        AgentEvent::ToolStart { name, input } => app.start_agent_tool(name, input),
-        AgentEvent::ToolOutput(line) => app.append_output_line(line),
-        AgentEvent::ToolDone { exit_code, duration } => {
-            app.complete_command(exit_code, duration);
+        AgentEvent::ThoughtDelta(chunk) => app.append_agent_thought_delta(chunk),
+        AgentEvent::ResponseDelta(chunk) => app.append_agent_response_delta(chunk),
+        AgentEvent::Thought(thought) => {
+            app.agent_history.push(agent::AgentMessage::Thought(thought.clone()));
+            app.add_agent_thought(thought);
         }
-        AgentEvent::Response(resp) => app.add_agent_response(resp),
+        AgentEvent::ToolStart { name, input } => {
+            app.agent_history.push(agent::AgentMessage::ToolCall {
+                name: name.clone(),
+                input: input.clone(),
+            });
+            app.start_agent_tool(name, input);
+        }
+        AgentEvent::ToolOutput(line) => app.append_output_line(line),
+        AgentEvent::ToolDone { exit_code, duration } => handle_tool_done(app, exit_code, duration),
+        AgentEvent::Response(resp) => {
+            app.agent_history.push(agent::AgentMessage::Response(resp.clone()));
+            app.add_agent_response(resp);
+        }
         AgentEvent::Finished | AgentEvent::Cancelled => app.finish_agent(),
         AgentEvent::Error(err) => {
             app.add_agent_response(format!("Error: {}", err));

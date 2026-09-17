@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::agent::backend::AgentMessage;
 use crate::agent::http::{HttpRequest, post_json};
-use crate::agent::provider::{LlmProvider, LlmResponse};
+use crate::agent::provider::{ChatRequestParams, LlmProvider, LlmResponse};
 use crate::agent::react::ToolCallRequest;
 use crate::agent::tool::ToolDefinition;
 
@@ -135,12 +135,12 @@ fn parse_openai_response(val: Value) -> Result<LlmResponse, String> {
 }
 
 impl LlmProvider for OpenAiProvider {
-    async fn chat(&self, history: &[AgentMessage], tools: &[ToolDefinition]) -> Result<LlmResponse, String> {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
         let url = format!("{}/v1/chat/completions", self.config.base_url.trim_end_matches('/'));
         let payload = json!({
             "model": self.config.model,
-            "messages": self.format_messages(history),
-            "tools": self.format_tools(tools)
+            "messages": self.format_messages(params.history),
+            "tools": self.format_tools(params.tools)
         });
         let body_str = payload.to_string();
         let raw = post_json(HttpRequest {

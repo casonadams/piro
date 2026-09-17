@@ -1,8 +1,9 @@
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::mpsc;
 
 use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
-use crate::agent::react::ToolCallRequest;
+use crate::agent::react::{AgentEvent, ToolCallRequest};
 use crate::agent::tool::ToolDefinition;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -12,12 +13,17 @@ pub struct LlmResponse {
     pub content: Option<String>,
 }
 
+pub struct ChatRequestParams<'a> {
+    pub history: &'a [AgentMessage],
+    pub tools: &'a [ToolDefinition],
+    pub delta_tx: Option<mpsc::UnboundedSender<AgentEvent>>,
+}
+
 pub trait LlmProvider: Send + Sync + 'static {
-    fn chat(
-        &self,
-        history: &[AgentMessage],
-        tools: &[ToolDefinition],
-    ) -> impl std::future::Future<Output = Result<LlmResponse, String>> + Send;
+    fn chat_stream<'a>(
+        &'a self,
+        params: ChatRequestParams<'a>,
+    ) -> impl std::future::Future<Output = Result<LlmResponse, String>> + Send + use<'a, Self>;
 }
 
 pub struct ProviderBackend<P> {
@@ -25,6 +31,7 @@ pub struct ProviderBackend<P> {
     tools: Vec<ToolDefinition>,
     pending_tool_call: Option<ToolCallRequest>,
     pending_final_answer: Option<String>,
+    delta_tx: Option<mpsc::UnboundedSender<AgentEvent>>,
 }
 
 impl<P: LlmProvider> ProviderBackend<P> {
@@ -34,7 +41,13 @@ impl<P: LlmProvider> ProviderBackend<P> {
             tools,
             pending_tool_call: None,
             pending_final_answer: None,
+            delta_tx: None,
         }
+    }
+
+    pub fn with_delta_tx(mut self, delta_tx: mpsc::UnboundedSender<AgentEvent>) -> Self {
+        self.delta_tx = Some(delta_tx);
+        self
     }
 }
 
@@ -51,7 +64,14 @@ impl<P: LlmProvider> AgentBackend for ProviderBackend<P> {
             return Ok(StepResult::FinalAnswer(ans));
         }
 
-        let resp = self.provider.chat(history, &self.tools).await?;
+        let resp = self
+            .provider
+            .chat_stream(ChatRequestParams {
+                history,
+                tools: &self.tools,
+                delta_tx: self.delta_tx.clone(),
+            })
+            .await?;
 
         if let Some(thought) = resp.thinking {
             let mut calls = resp.tool_calls;
@@ -97,13 +117,14 @@ impl MockProvider {
 
 #[cfg(test)]
 impl LlmProvider for MockProvider {
-    async fn chat(&self, history: &[AgentMessage], _tools: &[ToolDefinition]) -> Result<LlmResponse, String> {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
         let i = self.idx.fetch_add(1, Ordering::SeqCst);
         if let Some(resp) = self.responses.get(i).cloned() {
             return Ok(resp);
         }
 
-        let prompt = history
+        let prompt = params
+            .history
             .iter()
             .find_map(|m| match m {
                 AgentMessage::User(u) => Some(u.as_str()),
@@ -111,7 +132,7 @@ impl LlmProvider for MockProvider {
             })
             .unwrap_or("");
 
-        let has_thought = history.iter().any(|m| matches!(m, AgentMessage::Thought(_)));
+        let has_thought = params.history.iter().any(|m| matches!(m, AgentMessage::Thought(_)));
         if !has_thought {
             return Ok(LlmResponse {
                 thinking: Some("Reasoning about task".into()),
