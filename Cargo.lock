@@ -501,6 +501,7 @@ dependencies = [
  "ansi-to-tui",
  "crossterm",
  "futures-util",
+ "libc",
  "ratatui",
  "tokio",
  "unicode-width",

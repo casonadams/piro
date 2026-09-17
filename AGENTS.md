@@ -35,7 +35,10 @@ src/
   - `ScrollState`: Virtual scroll calculations with sticky auto-scroll when at the bottom, and manual scrollback offset tracking.
   - `FeedItem`: `UserInput(String)` and `CommandOutput(CommandOutputBlock)`.
   - `App`: Central state store managing process `AbortHandle`, input state, mode, and feed history.
-- **`src/runner.rs`**: Executes commands asynchronously via `$SHELL -c` (fallback to `/bin/sh -c`), streaming stdout and stderr line-by-line while stripping raw ANSI escape sequences. Uses Tokio's native `AbortHandle` for instant cancellation on `Ctrl+C`.
+- **`src/runner.rs`**: Executes commands asynchronously via `$SHELL -c` (fallback to `/bin/sh -c`), streaming stdout and stderr line-by-line while preserving rich ANSI escape sequences parsed via `ansi-to-tui`.
+  - Spawns subprocesses with `CLICOLOR=1`, `CLICOLOR_FORCE=1`, `FORCE_COLOR=1`, `COLORTERM=truecolor`, and `TERM=xterm-256color` so that CLI tools (`cargo`, `git`, `ls`, `grep`) emit full terminal colors even when piped.
+  - Spawns with `process_group(0)` and `kill_on_drop(true)`.
+  - Exposes `ProcessHandle` which uses `libc::kill(-pid, SIGKILL)` to immediately terminate the entire process group in its tracks on `Esc` or `Ctrl+C`.
 - **`src/terminal.rs`**: RAII `TerminalGuard` enabling raw mode, alternate screen, and mouse capture. Installs a custom panic hook ensuring the terminal is restored to normal mode under all crash conditions.
 - **`src/ui/`**: Modular presentation layer.
   - `blocks.rs`: Renders distinct bordered cards for user input and command output using reusable `box_border` and `box_line` helpers.

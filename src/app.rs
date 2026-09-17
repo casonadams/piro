@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::task::AbortHandle;
+
+use crate::runner::ProcessHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -246,7 +247,7 @@ pub struct App {
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
     pub draft_input: String,
-    pub active_abort: Option<AbortHandle>,
+    pub active_process: Option<ProcessHandle>,
 }
 
 impl App {
@@ -266,7 +267,7 @@ impl App {
             history: Vec::new(),
             history_idx: None,
             draft_input: String::new(),
-            active_abort: None,
+            active_process: None,
         };
         app.load_history();
         app
@@ -331,10 +332,10 @@ impl App {
     }
 
     pub fn is_command_running(&self) -> bool {
-        self.active_abort.is_some()
+        self.active_process.is_some()
     }
 
-    pub fn add_command(&mut self, command: String, handle: AbortHandle) {
+    pub fn add_command(&mut self, command: String, handle: ProcessHandle) {
         if self.history.last().map(|s| s.as_str()) != Some(&command) {
             if self.history.len() >= 1000 {
                 self.history.remove(0);
@@ -352,7 +353,7 @@ impl App {
             started_at: Instant::now(),
             duration: None,
         }));
-        self.active_abort = Some(handle);
+        self.active_process = Some(handle);
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
     }
@@ -367,7 +368,7 @@ impl App {
     }
 
     pub fn complete_command(&mut self, exit_code: Option<i32>, duration: Duration) {
-        self.active_abort = None;
+        self.active_process = None;
         if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
             b.duration = Some(duration);
             b.status = match exit_code {
@@ -379,8 +380,8 @@ impl App {
     }
 
     pub fn cancel_active(&mut self) -> bool {
-        if let Some(handle) = self.active_abort.take() {
-            handle.abort();
+        if let Some(mut handle) = self.active_process.take() {
+            handle.kill();
             if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
                 b.duration = Some(b.started_at.elapsed());
                 b.status = CommandStatus::Cancelled;
@@ -580,8 +581,8 @@ mod tests {
     #[tokio::test]
     async fn test_input_and_history() {
         let mut app = App::new();
-        let abort = tokio::spawn(async {}).abort_handle();
-        app.add_command("echo 1".into(), abort);
+        let handle = ProcessHandle::mock(tokio::spawn(async {}).abort_handle());
+        app.add_command("echo 1".into(), handle);
         app.input.set_value("draft".into());
         app.history_prev();
         assert_eq!(app.input.value(), "echo 1");

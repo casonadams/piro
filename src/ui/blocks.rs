@@ -182,8 +182,21 @@ pub fn parse_and_wrap_ansi_line(raw: &str, target_width: usize) -> Vec<Vec<Span<
         Err(_) => vec![Span::raw(raw.to_string())],
     };
 
+    let total_w: usize = spans.iter().map(|s| span_visual_width(&s.content)).sum();
+    if total_w <= target_width {
+        let mut line = spans;
+        if total_w < target_width {
+            line.push(Span::raw(" ".repeat(target_width - total_w)));
+        }
+        return vec![line];
+    }
+
     let tokens = tokenize_spans(spans);
     wrap_tokens_to_lines(tokens, target_width)
+}
+
+fn span_visual_width(text: &str) -> usize {
+    text.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
 }
 
 fn wrap_text_to_spans(text: &str, target_width: usize, style: Style) -> Vec<Vec<Span<'static>>> {
