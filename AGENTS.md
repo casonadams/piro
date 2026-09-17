@@ -70,20 +70,26 @@ The application provides two operational modes:
    - `PageUp`, `Ctrl+S`, or `Esc` (when input is empty) enters **Scroll Mode**.
    - Footer displays ` READY ` (or ` RUNNING `).
 2. **Scroll Mode (`Mode::Scroll`)**:
-   - Input cursor is hidden.
-   - Navigation keys:
-     - `k` / `Up`: scroll up 1 line
-     - `j` / `Down`: scroll down 1 line
-     - `PageUp` / `Ctrl+U`: scroll up 10 lines
-     - `PageDown` / `Ctrl+D`: scroll down 10 lines
-     - `g` / `Home`: scroll to top
-     - `G` / `End`: scroll to bottom
-     - `i` / `q` / `Esc` / `Enter`: exit Scroll Mode and return to the input prompt.
-   - **Text Selection & Copy**:
-     - Mouse capture is not enabled, allowing the native OS terminal to click and drag across any text on screen.
-     - Pressing `Cmd+C` copies highlighted text directly to the system clipboard.
+   - Navigation & Cursor in feed:
+     - `k` / `Up`: move cursor up 1 line
+     - `j` / `Down`: move cursor down 1 line
+     - `PageUp` / `Ctrl+U`: move cursor up 10 lines
+     - `PageDown` / `Ctrl+D`: move cursor down 10 lines
+     - `g` / `Home`: jump to top of feed
+     - `G` / `End`: jump to bottom of feed
+     - `i` / `q`: exit Scroll Mode and return to input prompt.
+   - **Visual Line Selection (Tmux-Style)**:
+     - Press `v` or `Space` to toggle visual selection anchor.
+     - Move with `k`/`j` or `Up`/`Down` to extend the highlighted selection range across lines.
+     - Highlighted lines are visually inverted (`Modifier::REVERSED`).
+     - Press `y` or `Enter` to yank (copy) selected lines to the system clipboard via OSC 52 escape codes and macOS `pbcopy`.
+     - Press `Esc` to cancel visual selection (or exit scroll mode if no selection is active).
+   - **Mouse Selection**:
+     - Mouse drag natively highlights text for standard `Cmd+C` copy.
    - Footer displays:
-     ` SCROLL MODE   [↑/↓/PgUp/PgDn/jk] Scroll  [Mouse drag to copy]  [i/q/Esc] Return `
+     - Default: ` SCROLL MODE   [↑/↓/jk] Move  [v/Space] Select  [y] Copy line  [i/q/Esc] Return `
+     - When Selecting: ` VISUAL SELECT   [↑/↓/jk] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
+     - On copy: shows temporary ` [Copied!] ` confirmation.
 
 ## UI & Layout Invariants
 

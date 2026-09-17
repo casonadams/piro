@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod runner;
 mod terminal;
 mod ui;
@@ -36,9 +37,10 @@ async fn main() -> std::io::Result<()> {
             Some(Ok(event)) = reader.next() => {
                 match event {
                     CrosstermEvent::Key(key) => {
+                        let term_width = terminal.size()?.width as usize;
                         match app.mode {
                             Mode::Input => handle_input_mode_key(&mut app, key, &runner_tx),
-                            Mode::Scroll => handle_scroll_mode_key(&mut app, key),
+                            Mode::Scroll => handle_scroll_mode_key(&mut app, key, term_width),
                         }
                     }
                     CrosstermEvent::Resize(_, _) => {}
@@ -79,7 +81,7 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
         }
         KeyCode::PageUp => {
             app.enter_scroll_mode();
-            app.scroll_up(10);
+            app.move_cursor_up(10);
         }
         KeyCode::PageDown => {
             app.scroll_down(10);
@@ -106,33 +108,54 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
     }
 }
 
-fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent) {
+fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_width: usize) {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
-                app.exit_scroll_mode();
+                if app.selection_anchor.is_some() {
+                    app.selection_anchor = None;
+                } else {
+                    app.exit_scroll_mode();
+                }
             }
-            KeyCode::Char('u') => {
-                app.scroll_up(10);
-            }
-            KeyCode::Char('d') => {
-                app.scroll_down(10);
-            }
+            KeyCode::Char('u') => app.move_cursor_up(10),
+            KeyCode::Char('d') => app.move_cursor_down(10),
             _ => {}
         }
         return;
     }
 
     match key.code {
-        // Exit scroll mode back to input prompt
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') | KeyCode::Enter => {
+        // Toggle visual selection (like tmux 'v' / Space)
+        KeyCode::Char('v') | KeyCode::Char(' ') => {
+            app.toggle_selection();
+        }
+        // Yank / Copy selected lines
+        KeyCode::Char('y') | KeyCode::Enter => {
+            let width = term_width.saturating_sub(1);
+            let text = ui::feed::get_selected_text(app, width);
+            if !text.is_empty() {
+                clipboard::copy_to_clipboard(&text);
+                app.copied_flash = true;
+            }
+            app.selection_anchor = None;
+        }
+        // Exit or cancel selection
+        KeyCode::Esc => {
+            if app.selection_anchor.is_some() {
+                app.selection_anchor = None;
+            } else {
+                app.exit_scroll_mode();
+            }
+        }
+        KeyCode::Char('q') | KeyCode::Char('i') => {
             app.exit_scroll_mode();
         }
-        // Scrolling
-        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
-        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
-        KeyCode::PageUp => app.scroll_up(10),
-        KeyCode::PageDown => app.scroll_down(10),
+        // Cursor movement in feed
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_cursor_down(1),
+        KeyCode::PageUp => app.move_cursor_up(10),
+        KeyCode::PageDown => app.move_cursor_down(10),
         KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
         KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
         _ => {}

@@ -165,6 +165,9 @@ pub struct App {
     pub scroll: ScrollState,
     pub total_feed_lines: usize,
     pub viewport_height: usize,
+    pub cursor_line: usize,
+    pub selection_anchor: Option<usize>,
+    pub copied_flash: bool,
     pub active_abort: Option<AbortHandle>,
 }
 
@@ -178,6 +181,9 @@ impl App {
             scroll: ScrollState::new(),
             total_feed_lines: 0,
             viewport_height: 10,
+            cursor_line: 0,
+            selection_anchor: None,
+            copied_flash: false,
             active_abort: None,
         }
     }
@@ -235,15 +241,48 @@ impl App {
 
     pub fn enter_scroll_mode(&mut self) {
         self.mode = Mode::Scroll;
+        self.selection_anchor = None;
+        self.copied_flash = false;
+        if self.total_feed_lines > 0 {
+            self.cursor_line = self.total_feed_lines.saturating_sub(1);
+        }
     }
 
     pub fn exit_scroll_mode(&mut self) {
         self.mode = Mode::Input;
+        self.selection_anchor = None;
+        self.copied_flash = false;
     }
 
-    pub fn scroll_up(&mut self, delta: usize) {
-        self.scroll
-            .scroll_up(delta, self.total_feed_lines, self.viewport_height);
+    pub fn toggle_selection(&mut self) {
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.cursor_line);
+        } else {
+            self.selection_anchor = None;
+        }
+    }
+
+    pub fn move_cursor_up(&mut self, delta: usize) {
+        if self.total_feed_lines == 0 {
+            return;
+        }
+        self.cursor_line = self.cursor_line.saturating_sub(delta);
+        let (start, _end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        if self.cursor_line < start {
+            self.scroll
+                .scroll_up(start - self.cursor_line, self.total_feed_lines, self.viewport_height);
+        }
+    }
+
+    pub fn move_cursor_down(&mut self, delta: usize) {
+        if self.total_feed_lines == 0 {
+            return;
+        }
+        self.cursor_line = (self.cursor_line + delta).min(self.total_feed_lines.saturating_sub(1));
+        let (_start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        if self.cursor_line >= end {
+            self.scroll.scroll_down(self.cursor_line - end + 1);
+        }
     }
 
     pub fn scroll_down(&mut self, delta: usize) {
@@ -252,10 +291,14 @@ impl App {
 
     pub fn scroll_to_top(&mut self) {
         self.scroll.scroll_to_top(self.total_feed_lines, self.viewport_height);
+        self.cursor_line = 0;
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll.scroll_to_bottom();
+        if self.total_feed_lines > 0 {
+            self.cursor_line = self.total_feed_lines.saturating_sub(1);
+        }
     }
 }
 
@@ -293,5 +336,29 @@ mod tests {
         scroll.scroll_down(10);
         assert_eq!(scroll.visible_range(100, 20), (80, 100));
         assert!(scroll.auto_scroll);
+    }
+
+    #[test]
+    fn test_cursor_and_selection() {
+        let mut app = App::new();
+        app.total_feed_lines = 50;
+        app.viewport_height = 20;
+
+        app.enter_scroll_mode();
+        assert_eq!(app.mode, Mode::Scroll);
+        assert_eq!(app.cursor_line, 49);
+        assert_eq!(app.selection_anchor, None);
+
+        app.toggle_selection();
+        assert_eq!(app.selection_anchor, Some(49));
+
+        app.move_cursor_up(5);
+        assert_eq!(app.cursor_line, 44);
+
+        app.toggle_selection();
+        assert_eq!(app.selection_anchor, None);
+
+        app.exit_scroll_mode();
+        assert_eq!(app.mode, Mode::Input);
     }
 }
