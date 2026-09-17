@@ -136,7 +136,17 @@ impl LlmProvider for OllamaProvider {
             body: &body_str,
             auth_token: None,
         })
-        .await?;
+        .await
+        .map_err(|e| {
+            if e.contains("Failed to connect") || e.contains("Connection refused") || e.contains("exit 7") {
+                format!(
+                    "Ollama unreachable at {}. Ensure 'ollama serve' is running.",
+                    self.base_url
+                )
+            } else {
+                e
+            }
+        })?;
 
         let body: Value = serde_json::from_str(&raw).map_err(|e| format!("Failed to parse Ollama JSON: {}", e))?;
 
