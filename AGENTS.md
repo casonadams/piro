@@ -61,7 +61,11 @@ All future contributions and modifications MUST adhere to these strict size and 
    - Do NOT re-add `chrono` or date/time parsing crates unless strictly mandated.
    - Maintain `tokio` with minimal feature set: `["rt-multi-thread", "macros", "process", "io-util", "sync", "time"]`.
    - Maintain `ratatui` with `default-features = false, features = ["crossterm", "std"]` to avoid transitive calendar/time dependencies.
-4. **Release Profile Configuration**:
+4. **Zero-Warning & Zero-Override Policy (`#[allow(...)]` Forbidden)**:
+   - Do NOT use `#[allow(dead_code)]`, `#[allow(unused)]`, or any other compiler/clippy warning suppressions.
+   - Every function, struct, and variant must either be genuinely wired into calling paths, stubbed with a real consumer, or placed behind `#[cfg(test)]` if test-only.
+   - All code must compile cleanly and strictly on its own merits without suppressions.
+5. **Release Profile Configuration**:
    - Keep `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, and `strip = true` in `[profile.release]`.
 
 ## Scroll Mode & Copy Behavior (Tmux-Style)
@@ -158,7 +162,7 @@ Every change must pass all four quality gates with zero warnings:
 # 1. Format check
 cargo fmt --check
 
-# 2. Strict Clippy check (zero warnings permitted)
+# 2. Strict Clippy check (zero warnings permitted, zero #[allow(...)] overrides)
 cargo clippy -- -D warnings
 
 # 3. Unit and integration tests

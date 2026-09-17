@@ -7,8 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::AbortHandle;
 
 pub use backend::{AgentBackend, AgentMessage, MockAgentBackend, StepResult};
-#[allow(unused_imports)]
-pub use tool::{BashTool, Tool, ToolRegistry, ToolResult, ToolRun};
+pub use tool::{Tool, ToolRegistry};
 
 use crate::runner::ProcessHandle;
 
@@ -52,6 +51,7 @@ pub fn spawn_agent<B: AgentBackend + 'static>(
     let tool_ref = active_tool.clone();
 
     let task = tokio::spawn(async move {
+        let _tools = registry.format_descriptions();
         let mut history = vec![AgentMessage::User(prompt)];
         for _ in 0..MAX_AGENT_STEPS {
             let next = match backend.next_step(&history).await {

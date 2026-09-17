@@ -19,7 +19,6 @@ pub struct ToolRun {
 
 pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
-    #[allow(dead_code)]
     fn description(&self) -> &'static str;
     fn run(&self, args: &str, line_tx: mpsc::UnboundedSender<String>) -> ToolRun;
 }
@@ -88,9 +87,16 @@ impl ToolRegistry {
         self.tools.iter().find(|t| t.name() == name).cloned()
     }
 
-    #[allow(dead_code)]
     pub fn list(&self) -> &[Arc<dyn Tool>] {
         &self.tools
+    }
+
+    pub fn format_descriptions(&self) -> String {
+        self.list()
+            .iter()
+            .map(|t| format!("- {}: {}", t.name(), t.description()))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

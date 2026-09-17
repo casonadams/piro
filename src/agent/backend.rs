@@ -32,7 +32,7 @@ impl MockAgentBackend {
         Self::default()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn from_steps(steps: Vec<StepResult>) -> Self {
         Self { steps, step_idx: 0 }
     }
