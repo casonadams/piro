@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Position, Rect},
-    style::{Color, Modifier, Style},
+    style::Modifier,
     text::Line,
     widgets::{Block, Borders, Paragraph},
 };
@@ -17,7 +17,6 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.feed.is_empty() {
         app.total_feed_lines = 0;
         let placeholder = Paragraph::new("No commands executed yet. Type a command below and press Enter.")
-            .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::NONE));
         frame.render_widget(placeholder, area);
         return;
@@ -48,7 +47,6 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
         0
     };
 
-    // Bottom-anchor content if it fits within the viewport height and auto-scrolling
     if pad > 0 {
         let mut padded = vec![Line::from(""); pad];
         padded.extend(visible);
@@ -57,17 +55,15 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
 
     frame.render_widget(Paragraph::new(visible), area);
 
-    // In Scroll Mode, apply visual selection highlight directly to buffer cells
     if app.mode == Mode::Scroll {
         if app.normalized_selection().is_some() {
             apply_doc_selection(frame.buffer_mut(), app, start, pad, area);
         }
 
-        // Place the hardware cursor at the active DocPos if it's currently on screen
         if app.cursor.line >= start && app.cursor.line < end {
-            let screen_row = area.y + (pad + (app.cursor.line - start)) as u16;
-            let screen_col = area.x + app.cursor.col.min(area.width.saturating_sub(1));
-            frame.set_cursor_position(Position::new(screen_col, screen_row));
+            let row = area.y + (pad + (app.cursor.line - start)) as u16;
+            let col = area.x + app.cursor.col.min(area.width.saturating_sub(1));
+            frame.set_cursor_position(Position::new(col, row));
         }
     }
 }
@@ -102,8 +98,7 @@ fn apply_doc_selection(buf: &mut Buffer, app: &App, start_line: usize, pad: usiz
 
             for col in col_start..=col_end {
                 if col < buf.area().right() && screen_row < buf.area().bottom() {
-                    let cell = &mut buf[(col, screen_row)];
-                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                    buf[(col, screen_row)].set_style(Modifier::REVERSED);
                 }
             }
         }
@@ -114,26 +109,21 @@ pub fn extract_selected_text(app: &App, width: usize) -> String {
     let mut all_lines = Vec::new();
     for item in &app.feed {
         match item {
-            FeedItem::UserInput(cmd) => lines_extend(&mut all_lines, render_user_input_block(cmd, width)),
-            FeedItem::CommandOutput(b) => lines_extend(&mut all_lines, render_command_output_block(b, width)),
+            FeedItem::UserInput(cmd) => all_lines.extend(render_user_input_block(cmd, width)),
+            FeedItem::CommandOutput(b) => all_lines.extend(render_command_output_block(b, width)),
         }
         all_lines.push(Line::from(""));
     }
 
-    let (sel_start, sel_end) = match app.normalized_selection() {
-        Some((s, e)) => (s, e),
-        None => (app.cursor, app.cursor),
-    };
-
-    let mut result = Vec::new();
+    let (sel_start, sel_end) = app.normalized_selection().unwrap_or((app.cursor, app.cursor));
     let start_idx = sel_start.line.min(all_lines.len());
     let end_limit = (sel_end.line + 1).min(all_lines.len());
 
+    let mut result = Vec::new();
     if start_idx < end_limit {
         for line in &all_lines[start_idx..end_limit] {
             let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             let cleaned = clean_scraped_line(&raw);
-
             if cleaned.is_empty() {
                 continue;
             }
@@ -143,8 +133,7 @@ pub fn extract_selected_text(app: &App, width: usize) -> String {
                 let end_col = (sel_start.col.max(sel_end.col) as usize).saturating_sub(2);
                 let chars: Vec<char> = cleaned.chars().collect();
                 if start_col < chars.len() {
-                    let end = end_col.min(chars.len());
-                    chars[start_col..end].iter().collect()
+                    chars[start_col..end_col.min(chars.len())].iter().collect()
                 } else {
                     cleaned
                 }
@@ -161,26 +150,16 @@ pub fn extract_selected_text(app: &App, width: usize) -> String {
     result.join("\n")
 }
 
-fn lines_extend(target: &mut Vec<Line<'static>>, source: Vec<Line<'static>>) {
-    target.extend(source);
-}
-
 fn clean_scraped_line(raw: &str) -> String {
-    let mut s = raw.trim_end();
-    if s.starts_with("│ ") {
-        s = &s["│ ".len()..];
-    } else if s.starts_with('│') {
-        s = &s['│'.len_utf8()..];
-    }
-    if s.ends_with(" │") {
-        s = &s[..s.len() - " │".len()];
-    } else if s.ends_with('│') {
-        s = &s[..s.len() - '│'.len_utf8()];
-    }
+    let s = raw.trim_end();
+    let s = s.strip_prefix("│ ").unwrap_or(s);
+    let s = s.strip_suffix(" │").unwrap_or(s);
+    let s = s.trim();
     if s.chars()
         .all(|c| c == '─' || c == '┌' || c == '┐' || c == '└' || c == '┘' || c == ' ')
     {
-        return String::new();
+        String::new()
+    } else {
+        s.to_string()
     }
-    s.to_string()
 }

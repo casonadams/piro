@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use ansi_to_tui::IntoText;
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -59,10 +57,7 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     ));
 
     // Spacer
-    lines.push(box_line(
-        vec![Span::styled(empty_line.clone(), Style::default())],
-        border,
-    ));
+    lines.push(box_line(vec![Span::raw(empty_line.clone())], border));
 
     // Output body with ANSI color parsing
     if block.lines.is_empty() {
@@ -78,10 +73,7 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     }
 
     // Spacer
-    lines.push(box_line(
-        vec![Span::styled(empty_line.clone(), Style::default())],
-        border,
-    ));
+    lines.push(box_line(vec![Span::raw(empty_line.clone())], border));
 
     // Failure / Cancel message
     match block.status {
@@ -94,7 +86,7 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
                 )],
                 border,
             ));
-            lines.push(box_line(vec![Span::styled(empty_line, Style::default())], border));
+            lines.push(box_line(vec![Span::raw(empty_line)], border));
         }
         CommandStatus::Cancelled => {
             let msg = fit_to_width("Command cancelled", inner_w);
@@ -105,18 +97,16 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
                 )],
                 border,
             ));
-            lines.push(box_line(vec![Span::styled(empty_line, Style::default())], border));
+            lines.push(box_line(vec![Span::raw(empty_line)], border));
         }
         _ => {}
     }
 
     // Took / Running line
+    let dur = block.duration.unwrap_or_else(|| block.started_at.elapsed());
     let status_str = match block.status {
-        CommandStatus::Running => format!("Running {}", format_duration(block.started_at.elapsed())),
-        _ => format!(
-            "Took {}",
-            format_duration(block.duration.unwrap_or_else(|| block.started_at.elapsed()))
-        ),
+        CommandStatus::Running => format!("Running {:.1}s", dur.as_secs_f64()),
+        _ => format!("Took {:.1}s", dur.as_secs_f64()),
     };
     lines.push(box_line(
         vec![Span::styled(fit_to_width(&status_str, inner_w), dim)],
@@ -146,12 +136,15 @@ fn fit_spans_to_width(spans: Vec<Span<'static>>, target_width: usize) -> Vec<Spa
     let mut current_width = 0;
 
     for span in spans {
-        let span_w = span_visual_width(&span.content);
+        let span_w: usize = span
+            .content
+            .chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
         if current_width + span_w <= target_width {
             current_width += span_w;
             out.push(span);
         } else {
-            // Needs truncation
             let budget = target_width.saturating_sub(current_width);
             let mut truncated = String::new();
             let mut w = 0;
@@ -170,15 +163,10 @@ fn fit_spans_to_width(spans: Vec<Span<'static>>, target_width: usize) -> Vec<Spa
     }
 
     if current_width < target_width {
-        let pad = target_width - current_width;
-        out.push(Span::raw(" ".repeat(pad)));
+        out.push(Span::raw(" ".repeat(target_width - current_width)));
     }
 
     out
-}
-
-fn span_visual_width(text: &str) -> usize {
-    text.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
 }
 
 pub fn fit_to_width(text: &str, target: usize) -> String {
@@ -198,10 +186,6 @@ pub fn fit_to_width(text: &str, target: usize) -> String {
     out
 }
 
-pub fn format_duration(dur: Duration) -> String {
-    format!("{:.1}s", dur.as_secs_f64())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,10 +194,16 @@ mod tests {
     fn test_ansi_parsing_and_width() {
         let raw = "\x1b[32mhello\x1b[0m \x1b[31mworld\x1b[0m";
         let spans = parse_ansi_line(raw, 20);
-
-        let total_w: usize = spans.iter().map(|s| span_visual_width(&s.content)).sum();
+        let total_w: usize = spans
+            .iter()
+            .map(|s| {
+                s.content
+                    .chars()
+                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                    .sum::<usize>()
+            })
+            .sum();
         assert_eq!(total_w, 20);
-
         assert_eq!(spans[0].content, "hello");
         assert_eq!(spans[0].style.fg, Some(Color::Green));
     }

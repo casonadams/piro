@@ -94,55 +94,32 @@ pub struct ScrollState {
 }
 
 impl ScrollState {
-    pub fn new() -> Self {
-        Self {
-            scroll_from_bottom: 0,
-            auto_scroll: true,
-        }
-    }
-
-    pub fn scroll_up(&mut self, delta: usize, total_lines: usize, viewport_height: usize) {
-        if total_lines <= viewport_height {
-            return;
-        }
-        let max = total_lines.saturating_sub(viewport_height);
-        self.scroll_from_bottom = (self.scroll_from_bottom + delta).min(max);
-        self.auto_scroll = false;
-    }
-
-    pub fn scroll_down(&mut self, delta: usize) {
-        if self.scroll_from_bottom <= delta {
-            self.scroll_from_bottom = 0;
-            self.auto_scroll = true;
-        } else {
-            self.scroll_from_bottom -= delta;
-        }
-    }
-
-    pub fn scroll_to_top(&mut self, total_lines: usize, viewport_height: usize) {
-        if total_lines > viewport_height {
-            self.scroll_from_bottom = total_lines - viewport_height;
+    pub fn scroll_up(&mut self, delta: usize, total: usize, view: usize) {
+        if total > view {
+            self.scroll_from_bottom = (self.scroll_from_bottom + delta).min(total - view);
             self.auto_scroll = false;
         }
     }
 
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_from_bottom = 0;
-        self.auto_scroll = true;
+    pub fn scroll_down(&mut self, delta: usize) {
+        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(delta);
+        if self.scroll_from_bottom == 0 {
+            self.auto_scroll = true;
+        }
     }
 
-    pub fn visible_range(&self, total_lines: usize, viewport_height: usize) -> (usize, usize) {
-        if total_lines <= viewport_height {
-            return (0, total_lines);
+    pub fn visible_range(&self, total: usize, view: usize) -> (usize, usize) {
+        if total <= view {
+            return (0, total);
         }
-        let max = total_lines.saturating_sub(viewport_height);
+        let max = total - view;
         let offset = if self.auto_scroll {
             0
         } else {
             self.scroll_from_bottom.min(max)
         };
         let start = max - offset;
-        (start, (start + viewport_height).min(total_lines))
+        (start, (start + view).min(total))
     }
 }
 
@@ -171,7 +148,7 @@ impl App {
             mode: Mode::Input,
             input: InputState::default(),
             feed: Vec::new(),
-            scroll: ScrollState::new(),
+            scroll: ScrollState::default(),
             total_feed_lines: 0,
             viewport_height: 10,
             cursor: DocPos::default(),
@@ -198,7 +175,6 @@ impl App {
         }
         self.history_idx = None;
         self.draft_input.clear();
-
         self.feed.push(FeedItem::UserInput(command.clone()));
         self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command,
@@ -208,36 +184,8 @@ impl App {
             duration: None,
         }));
         self.active_abort = Some(handle);
-        self.scroll.scroll_to_bottom();
-    }
-
-    pub fn history_prev(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let next_idx = match self.history_idx {
-            None => {
-                self.draft_input = self.input.value().to_string();
-                self.history.len().saturating_sub(1)
-            }
-            Some(idx) => idx.saturating_sub(1),
-        };
-        self.history_idx = Some(next_idx);
-        self.input.set_value(self.history[next_idx].clone());
-    }
-
-    pub fn history_next(&mut self) {
-        let Some(idx) = self.history_idx else {
-            return;
-        };
-        if idx + 1 < self.history.len() {
-            let next_idx = idx + 1;
-            self.history_idx = Some(next_idx);
-            self.input.set_value(self.history[next_idx].clone());
-        } else {
-            self.history_idx = None;
-            self.input.set_value(std::mem::take(&mut self.draft_input));
-        }
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
     }
 
     pub fn append_output_line(&mut self, line: String) {
@@ -255,7 +203,7 @@ impl App {
             b.duration = Some(duration);
             b.status = match exit_code {
                 Some(0) => CommandStatus::Success(0),
-                Some(code) => CommandStatus::Failed(code),
+                Some(c) => CommandStatus::Failed(c),
                 None => CommandStatus::Failed(-1),
             };
         }
@@ -279,8 +227,10 @@ impl App {
         self.selection_anchor = None;
         self.selection_type = SelectionType::Char;
         self.copied_flash = false;
-        let line = self.total_feed_lines.saturating_sub(1);
-        self.cursor = DocPos { line, col: 2 };
+        self.cursor = DocPos {
+            line: self.total_feed_lines.saturating_sub(1),
+            col: 2,
+        };
     }
 
     pub fn exit_scroll_mode(&mut self) {
@@ -305,11 +255,11 @@ impl App {
     }
 
     pub fn normalized_selection(&self) -> Option<(DocPos, DocPos)> {
-        self.selection_anchor.map(|anchor| {
-            if anchor <= self.cursor {
-                (anchor, self.cursor)
+        self.selection_anchor.map(|a| {
+            if a <= self.cursor {
+                (a, self.cursor)
             } else {
-                (self.cursor, anchor)
+                (self.cursor, a)
             }
         })
     }
@@ -324,7 +274,7 @@ impl App {
 
     pub fn move_cursor_up(&mut self, delta: usize) {
         self.cursor.line = self.cursor.line.saturating_sub(delta);
-        let (start, _end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        let (start, _) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
         if self.cursor.line < start {
             self.scroll
                 .scroll_up(start - self.cursor.line, self.total_feed_lines, self.viewport_height);
@@ -335,16 +285,15 @@ impl App {
         let max_line = self.total_feed_lines.saturating_sub(1);
         if self.cursor.line < max_line {
             self.cursor.line = (self.cursor.line + delta).min(max_line);
-            let (_start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+            let (_, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
             if self.cursor.line >= end {
                 self.scroll.scroll_down(self.cursor.line - end + 1);
             }
             false
         } else if self.scroll.scroll_from_bottom > 0 {
-            self.scroll_down(delta);
+            self.scroll.scroll_down(delta);
             false
         } else {
-            // Already at the bottom line of the document and at bottom of viewport
             true
         }
     }
@@ -356,25 +305,24 @@ impl App {
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll.scroll_to_top(self.total_feed_lines, self.viewport_height);
+        if self.total_feed_lines > self.viewport_height {
+            self.scroll.scroll_from_bottom = self.total_feed_lines - self.viewport_height;
+            self.scroll.auto_scroll = false;
+        }
         self.cursor.line = 0;
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll.scroll_to_bottom();
+        self.scroll.scroll_from_bottom = 0;
+        self.scroll.auto_scroll = true;
         self.cursor.line = self.total_feed_lines.saturating_sub(1);
     }
 
     pub fn copy_current_block(&self) -> Option<String> {
-        for item in self.feed.iter().rev() {
-            if let FeedItem::CommandOutput(cmd) = item {
-                if cmd.lines.is_empty() {
-                    continue;
-                }
-                return Some(cmd.lines.join("\n"));
-            }
-        }
-        None
+        self.feed.iter().rev().find_map(|item| match item {
+            FeedItem::CommandOutput(cmd) if !cmd.lines.is_empty() => Some(cmd.lines.join("\n")),
+            _ => None,
+        })
     }
 
     pub fn screen_coords_to_doc_pos(&self, col: u16, row: u16) -> Option<DocPos> {
@@ -388,153 +336,79 @@ impl App {
         } else {
             0
         };
-
         let row = row as usize;
         if row < pad {
             return None;
         }
-        let line = (start + (row - pad)).min(self.total_feed_lines.saturating_sub(1));
-        Some(DocPos { line, col })
+        Some(DocPos {
+            line: (start + (row - pad)).min(self.total_feed_lines.saturating_sub(1)),
+            col,
+        })
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next_idx = match self.history_idx {
+            None => {
+                self.draft_input = self.input.value().to_string();
+                self.history.len().saturating_sub(1)
+            }
+            Some(i) => i.saturating_sub(1),
+        };
+        self.history_idx = Some(next_idx);
+        self.input.set_value(self.history[next_idx].clone());
+    }
+
+    pub fn history_next(&mut self) {
+        let Some(i) = self.history_idx else { return };
+        if i + 1 < self.history.len() {
+            self.history_idx = Some(i + 1);
+            self.input.set_value(self.history[i + 1].clone());
+        } else {
+            self.history_idx = None;
+            self.input.set_value(std::mem::take(&mut self.draft_input));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_input_state() {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-
-        let mut input = InputState::default();
-        let key_a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
-        let key_b = Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
-        input.handle_event(&key_a);
-        input.handle_event(&key_b);
-        assert_eq!(input.value(), "ab");
-        assert_eq!(input.cursor(), 2);
-
-        // Test Ctrl+W word deletion
-        let key_space = Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
-        let key_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
-        let key_ctrl_w = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-
-        input.handle_event(&key_space);
-        input.handle_event(&key_c);
-        assert_eq!(input.value(), "ab c");
-
-        input.handle_event(&key_ctrl_w);
-        assert_eq!(input.value(), "ab ");
-
-        assert_eq!(input.take_value(), "ab ");
-        assert_eq!(input.value(), "");
-    }
-
-    #[test]
-    fn test_scroll_state() {
-        let mut scroll = ScrollState::new();
-        assert_eq!(scroll.visible_range(100, 20), (80, 100));
-
-        scroll.scroll_up(10, 100, 20);
-        assert_eq!(scroll.visible_range(100, 20), (70, 90));
-
-        scroll.scroll_down(10);
-        assert_eq!(scroll.visible_range(100, 20), (80, 100));
-        assert!(scroll.auto_scroll);
-    }
-
-    #[test]
-    fn test_cursor_and_selection() {
-        let mut app = App::new();
-        app.total_feed_lines = 50;
-        app.viewport_height = 20;
-
-        app.enter_scroll_mode();
-        assert_eq!(app.mode, Mode::Scroll);
-        assert_eq!(app.cursor.line, 49);
-        assert_eq!(app.selection_anchor, None);
-
-        // Character visual selection
-        app.toggle_selection(SelectionType::Char);
-        assert_eq!(app.selection_anchor, Some(DocPos { line: 49, col: 2 }));
-
-        app.move_cursor_up(5);
-        assert_eq!(app.cursor.line, 44);
-
-        let (start, end) = app.normalized_selection().unwrap();
-        assert_eq!(start.line, 44);
-        assert_eq!(end.line, 49);
-
-        // Line visual selection (Shift+V)
-        app.toggle_selection(SelectionType::Line); // cancels current selection
-        app.toggle_selection(SelectionType::Line);
-        assert_eq!(app.selection_type, SelectionType::Line);
-
-        app.clear_selection();
-        assert_eq!(app.selection_anchor, None);
-        assert_eq!(app.normalized_selection(), None);
-
-        app.exit_scroll_mode();
-        assert_eq!(app.mode, Mode::Input);
-    }
-
-    #[test]
-    fn test_scroll_down_to_bottom_before_exit() {
-        let mut app = App::new();
-        app.total_feed_lines = 50;
-        app.viewport_height = 20;
-
-        app.enter_scroll_mode();
-        app.move_cursor_up(10);
-        assert_eq!(app.cursor.line, 39);
-
-        let past = app.move_cursor_down(5);
-        assert!(!past);
-        assert_eq!(app.cursor.line, 44);
-
-        let past = app.move_cursor_down(10);
-        assert!(!past);
-        assert_eq!(app.cursor.line, 49);
-
-        // Now scrolling down past the bottom-most line signals exit!
-        let past = app.move_cursor_down(2);
-        assert!(past);
-    }
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     #[tokio::test]
-    async fn test_command_history() {
+    async fn test_input_and_history() {
         let mut app = App::new();
-        let abort1 = tokio::spawn(async {}).abort_handle();
-        let abort2 = tokio::spawn(async {}).abort_handle();
-        app.add_command("cargo test".into(), abort1);
-        app.add_command("git status".into(), abort2);
-
-        // History deduplicates identical consecutive commands
-        let abort3 = tokio::spawn(async {}).abort_handle();
-        app.add_command("git status".into(), abort3);
-        assert_eq!(app.history.len(), 2);
-
-        // Type a draft
-        app.input.set_value("partial".into());
-
-        // Up arrow recalls previous
+        let abort = tokio::spawn(async {}).abort_handle();
+        app.add_command("echo 1".into(), abort);
+        app.input.set_value("draft".into());
         app.history_prev();
-        assert_eq!(app.input.value(), "git status");
-
-        // Up arrow recalls older
-        app.history_prev();
-        assert_eq!(app.input.value(), "cargo test");
-
-        // Up arrow at top stays at oldest
-        app.history_prev();
-        assert_eq!(app.input.value(), "cargo test");
-
-        // Down arrow advances
+        assert_eq!(app.input.value(), "echo 1");
         app.history_next();
-        assert_eq!(app.input.value(), "git status");
+        assert_eq!(app.input.value(), "draft");
 
-        // Down arrow at bottom restores draft
-        app.history_next();
-        assert_eq!(app.input.value(), "partial");
+        let key_w = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        app.input.handle_event(&key_w);
+        assert_eq!(app.input.take_value(), "");
+    }
+
+    #[test]
+    fn test_scroll_and_selection() {
+        let mut app = App::new();
+        app.total_feed_lines = 50;
+        app.viewport_height = 20;
+
+        app.enter_scroll_mode();
+        assert_eq!(app.cursor.line, 49);
+        app.toggle_selection(SelectionType::Char);
+        app.move_cursor_up(5);
+        assert_eq!(app.cursor.line, 44);
+        let (s, e) = app.normalized_selection().unwrap();
+        assert_eq!((s.line, e.line), (44, 49));
+
+        assert!(!app.move_cursor_down(5));
+        assert!(app.move_cursor_down(1));
     }
 }

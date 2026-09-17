@@ -65,13 +65,14 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 if !app.cancel_active() {
                     app.running = false;
                 }
+                return;
             }
             KeyCode::Char('s') => {
                 app.enter_scroll_mode();
+                return;
             }
             _ => {}
         }
-        return;
     }
 
     match key.code {
@@ -84,19 +85,13 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 }
             }
         }
-        KeyCode::Up => {
-            app.history_prev();
-        }
-        KeyCode::Down => {
-            app.history_next();
-        }
+        KeyCode::Up => app.history_prev(),
+        KeyCode::Down => app.history_next(),
         KeyCode::PageUp => {
             app.enter_scroll_mode();
             app.move_cursor_up(10);
         }
-        KeyCode::PageDown => {
-            app.scroll_down(10);
-        }
+        KeyCode::PageDown => app.scroll_down(10),
         KeyCode::Enter => {
             let cmd = app.input.take_value().trim().to_string();
             if !cmd.is_empty() {
@@ -108,9 +103,7 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 }
             }
         }
-        _ => {
-            app.input.handle_event(&CrosstermEvent::Key(key));
-        }
+        _ => app.input.handle_event(&CrosstermEvent::Key(key)),
     }
 }
 
@@ -136,28 +129,16 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
     }
 
     match key.code {
-        // Toggle character visual selection (like tmux 'v' / Space)
-        KeyCode::Char('v') | KeyCode::Char(' ') => {
-            app.toggle_selection(SelectionType::Char);
-        }
-        // Toggle full-line visual selection (Shift+V)
-        KeyCode::Char('V') => {
-            app.toggle_selection(SelectionType::Line);
-        }
-        // Copy entire command block (convenient 1-key block copy)
+        KeyCode::Char('v') | KeyCode::Char(' ') => app.toggle_selection(SelectionType::Char),
+        KeyCode::Char('V') => app.toggle_selection(SelectionType::Line),
         KeyCode::Char('b') => {
             if let Some(text) = app.copy_current_block() {
                 clipboard::copy_to_clipboard(&text);
                 app.copied_flash = true;
             }
         }
-        // Yank / Copy selected lines
         KeyCode::Char('y') | KeyCode::Enter => {
             let width = term_width.saturating_sub(1);
-            if app.selection_anchor.is_none() {
-                app.selection_type = SelectionType::Line;
-                app.selection_anchor = Some(app.cursor);
-            }
             let text = ui::feed::extract_selected_text(app, width);
             if !text.is_empty() {
                 clipboard::copy_to_clipboard(&text);
@@ -166,7 +147,6 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
             app.clear_selection();
             app.exit_scroll_mode();
         }
-        // Exit or cancel selection
         KeyCode::Esc => {
             if app.selection_anchor.is_some() {
                 app.clear_selection();
@@ -178,7 +158,6 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
             app.clear_selection();
             app.exit_scroll_mode();
         }
-        // 2D Cursor movement in document (h/j/k/l and arrow keys)
         KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
         KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, max_col),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
@@ -206,11 +185,8 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, term_w
             app.move_cursor_up(2);
         }
         MouseEventKind::ScrollDown => {
-            if app.mode == Mode::Scroll {
-                let past_bottom = app.move_cursor_down(2);
-                if past_bottom {
-                    app.exit_scroll_mode();
-                }
+            if app.mode == Mode::Scroll && app.move_cursor_down(2) {
+                app.exit_scroll_mode();
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
