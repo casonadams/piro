@@ -3,8 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::agent::{AgentEvent, ToolRegistry, spawn_agent};
 use crate::app::{App, InputIntent, Mode, SelectionType, parse_input_intent};
-use crate::clipboard;
-use crate::runner::{RunnerMsg, spawn_command};
+use crate::sys::{RunnerMsg, copy, spawn_command};
 use crate::ui;
 
 pub struct InputCtx<'a> {
@@ -34,7 +33,7 @@ pub fn cancel_and_drain(
 pub fn copy_and_flash(app: &mut App, width: usize) {
     let text = ui::feed::extract_selected_text(app, width);
     if !text.is_empty() {
-        clipboard::copy(&text);
+        copy(&text);
         app.copied_flash = true;
     }
     app.clear_selection();
@@ -262,7 +261,7 @@ fn handle_scroll_plain(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
         KeyCode::Char('o') => app.toggle_expand(),
         KeyCode::Char('b') => {
             if let Some(text) = app.copy_current_block() {
-                clipboard::copy(&text);
+                copy(&text);
                 app.copied_flash = true;
             }
         }

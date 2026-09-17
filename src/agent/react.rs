@@ -5,7 +5,7 @@ use tokio::task::AbortHandle;
 
 use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
 use crate::agent::tool::{Tool, ToolRegistry, ToolResult};
-use crate::runner::ProcessHandle;
+use crate::sys::ProcessHandle;
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {

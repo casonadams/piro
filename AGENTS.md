@@ -7,6 +7,38 @@
 - Horizontal-ruled command prompt: clean lines, no side borders, no prompt glyph.
 - Minimal status bar with mode badges (`READY`, `RUNNING`, `THINKING`, `SCROLL`, `VISUAL`).
 
+## Architecture & Codebase Map
+
+```
+src/
+├── main.rs       # Entry point, tokio::select! loop, and terminal event multiplexing
+├── app/          # Application session state, input routing, and CLI flags
+│   ├── mod.rs    # Domain state (App, FeedItem, InputState, DocPos, ScrollState)
+│   ├── events.rs # Key & mouse event dispatch (InputCtx, ScrollCtx, NavBounds)
+│   └── cli.rs    # Command-line argument parsing (--model, flags)
+├── sys/          # Low-level OS, process, and terminal primitives
+│   ├── mod.rs    # Re-exports (ProcessHandle, RunnerMsg, spawn_command, TerminalGuard, copy)
+│   ├── runner.rs # Async subprocess runner ($SHELL -c), process groups, SIGKILL
+│   ├── terminal.rs # Raw mode, alternate screen, mouse capture, panic recovery
+│   └── clipboard.rs# OSC 52 sequence and platform clipboard integration
+├── agent/        # Autonomous ReAct loop, tools, and lifecycle hooks
+│   ├── mod.rs    # ReAct loop supervisor, AgentEvent stream, AgentHandle
+│   ├── backend.rs# AgentBackend trait, AgentMessage, MockAgentBackend
+│   ├── react.rs  # ReActEngine state machine & ReActHooks lifecycle seam
+│   └── tool.rs   # Tool trait, BashTool, ToolRegistry
+├── provider/     # LLM provider subsystem
+│   ├── mod.rs    # LlmProvider trait, ProviderBackend, AnyProvider, model spec routing
+│   ├── http.rs   # Async HTTP client (reqwest)
+│   └── openai.rs # Unified OpenAI-compatible adapter (Ollama, OpenAI, DeepSeek, Groq)
+└── ui/           # Terminal UI presentation layer (Ratatui)
+    ├── mod.rs    # Master layout (Feed, Separator, Input, Footer)
+    ├── feed.rs   # Virtual scrolling, selection slicing, text extraction
+    ├── blocks.rs # Titled cards: UserInput, CommandOutput (tools), Thought, Agent
+    ├── input.rs  # Input prompt bordered by top/bottom divider rules
+    ├── footer.rs # Status badges and active scrollback notifications
+    └── text.rs   # ANSI-aware word wrapping and display width calculation
+```
+
 ## Engineering Rigor & Code Invariants
 
 1. **Function Size & Struct Convention**:

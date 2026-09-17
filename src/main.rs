@@ -1,22 +1,17 @@
 mod agent;
 mod app;
-mod cli;
-mod clipboard;
-mod events;
 mod provider;
-mod runner;
-mod terminal;
+mod sys;
 mod ui;
 
 use std::time::Duration;
 
 use agent::{AgentConfig, AgentEvent, ToolRegistry, spawn_agent};
+use app::events::{InputCtx, ScrollCtx, handle_input_key, handle_mouse, handle_scroll_key};
 use app::{App, FeedItem, Mode};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
-use events::{handle_input_key, handle_mouse, handle_scroll_key};
 use futures_util::StreamExt;
-use runner::RunnerMsg;
-use terminal::TerminalGuard;
+use sys::{RunnerMsg, TerminalGuard};
 use tokio::sync::mpsc;
 
 struct LoopChannels<'a> {
@@ -35,7 +30,7 @@ fn dispatch_terminal_event(app: &mut App, input: TerminalInput, ch: &mut LoopCha
     match input.event {
         CrosstermEvent::Key(key) => match app.mode {
             Mode::Input => {
-                let mut ctx = events::InputCtx {
+                let mut ctx = InputCtx {
                     runner_tx: ch.runner_tx,
                     runner_rx: ch.runner_rx,
                     agent_tx: ch.agent_tx,
@@ -44,7 +39,7 @@ fn dispatch_terminal_event(app: &mut App, input: TerminalInput, ch: &mut LoopCha
                 handle_input_key(app, key, &mut ctx);
             }
             Mode::Scroll => {
-                let mut ctx = events::ScrollCtx {
+                let mut ctx = ScrollCtx {
                     width: input.width,
                     runner_rx: ch.runner_rx,
                     agent_rx: ch.agent_rx,
@@ -58,7 +53,7 @@ fn dispatch_terminal_event(app: &mut App, input: TerminalInput, ch: &mut LoopCha
 }
 
 fn init_app() -> Result<App, String> {
-    let args = cli::parse_args(std::env::args())?;
+    let args = app::cli::parse_args(std::env::args())?;
     if let Some(spec) = &args.model {
         provider::provider_from_spec(spec)?;
     }

@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::runner::{ProcessHandle, RunnerMsg, spawn_command};
+use crate::sys::{ProcessHandle, RunnerMsg, spawn_command};
 
 pub struct ToolResult {
     pub output: String,

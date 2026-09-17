@@ -1,9 +1,12 @@
+pub mod cli;
+pub mod events;
+
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::agent::{AgentHandle, AgentMessage};
-use crate::runner::ProcessHandle;
+use crate::sys::ProcessHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputIntent {
