@@ -62,9 +62,23 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
-                if !app.cancel_active() {
+                // Ctrl+C: clear user input
+                app.input.take_value();
+                return;
+            }
+            KeyCode::Char('d') => {
+                // Ctrl+D: exit on empty input, otherwise delete forward
+                if app.input.value().is_empty() {
                     app.running = false;
+                } else {
+                    app.input.delete_forward();
                 }
+                return;
+            }
+            KeyCode::Char('l') => {
+                // Ctrl+L: Clear screen / feed history
+                app.feed.clear();
+                app.scroll_to_bottom();
                 return;
             }
             KeyCode::Char('s') => {
@@ -123,12 +137,13 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
 
     match key.code {
         KeyCode::Esc => {
-            if !app.cancel_active() {
-                if app.input.value().is_empty() {
-                    app.enter_scroll_mode();
-                } else {
-                    let _ = app.input.take_value();
-                }
+            // Esc: cancel running command if running, otherwise toggle scroll or clear
+            if app.is_command_running() {
+                app.cancel_active();
+            } else if app.input.value().is_empty() {
+                app.enter_scroll_mode();
+            } else {
+                let _ = app.input.take_value();
             }
         }
         KeyCode::Up => app.history_prev(),
@@ -142,7 +157,7 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
             let cmd = app.input.take_value().trim().to_string();
             if !cmd.is_empty() {
                 if app.is_command_running() {
-                    app.append_output_line("Command already running, press Ctrl+C to cancel.".into());
+                    app.append_output_line("Command already running, press Esc to cancel.".into());
                 } else {
                     let handle = spawn_command(cmd.clone(), runner_tx.clone());
                     app.add_command(cmd, handle);
@@ -168,30 +183,59 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
             KeyCode::Char('c') => {
                 if app.selection_anchor.is_some() {
                     app.clear_selection();
+                } else if app.is_command_running() {
+                    app.cancel_active();
                 } else {
                     app.exit_scroll_mode();
                 }
             }
-            KeyCode::Char('u') => app.move_cursor_up(10),
             KeyCode::Char('d') => {
                 let _ = app.move_cursor_down(10);
             }
+            KeyCode::Char('u') => app.move_cursor_up(10),
             _ => {}
         }
         return;
     }
 
     match key.code {
-        KeyCode::Char('v') | KeyCode::Char(' ') => app.toggle_selection(SelectionType::Char),
-        KeyCode::Char('V') => app.toggle_selection(SelectionType::Line),
+        // Toggle character visual selection (like tmux 'v' / Space)
+        KeyCode::Char('v') | KeyCode::Char(' ') => {
+            app.toggle_selection(SelectionType::Char);
+        }
+        // Toggle full-line visual selection (Shift+V)
+        KeyCode::Char('V') => {
+            app.toggle_selection(SelectionType::Line);
+        }
+        // Copy entire command block (convenient 1-key block copy)
         KeyCode::Char('b') => {
             if let Some(text) = app.copy_current_block() {
                 clipboard::copy_to_clipboard(&text);
                 app.copied_flash = true;
             }
         }
-        KeyCode::Char('y') | KeyCode::Enter => {
+        // 'y': yank and KEEP cursor where it is!
+        KeyCode::Char('y') => {
             let width = term_width.saturating_sub(1);
+            if app.selection_anchor.is_none() {
+                app.selection_type = SelectionType::Line;
+                app.selection_anchor = Some(app.cursor);
+            }
+            let text = ui::feed::extract_selected_text(app, width);
+            if !text.is_empty() {
+                clipboard::copy_to_clipboard(&text);
+                app.copied_flash = true;
+            }
+            app.clear_selection();
+            // Stays in scroll mode!
+        }
+        // 'Enter': yank and RETURN to input!
+        KeyCode::Enter => {
+            let width = term_width.saturating_sub(1);
+            if app.selection_anchor.is_none() {
+                app.selection_type = SelectionType::Line;
+                app.selection_anchor = Some(app.cursor);
+            }
             let text = ui::feed::extract_selected_text(app, width);
             if !text.is_empty() {
                 clipboard::copy_to_clipboard(&text);
@@ -200,17 +244,26 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
             app.clear_selection();
             app.exit_scroll_mode();
         }
+        // 'q': drop out only!
+        KeyCode::Char('q') => {
+            app.clear_selection();
+            app.exit_scroll_mode();
+        }
+        // 'Esc': cancel running command if running, or clear selection, or drop out
         KeyCode::Esc => {
             if app.selection_anchor.is_some() {
                 app.clear_selection();
+            } else if app.is_command_running() {
+                app.cancel_active();
             } else {
                 app.exit_scroll_mode();
             }
         }
-        KeyCode::Char('q') | KeyCode::Char('i') => {
+        KeyCode::Char('i') => {
             app.clear_selection();
             app.exit_scroll_mode();
         }
+        // 2D Cursor movement in document
         KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
         KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, max_col),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
@@ -238,8 +291,11 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, term_w
             app.move_cursor_up(2);
         }
         MouseEventKind::ScrollDown => {
-            if app.mode == Mode::Scroll && app.move_cursor_down(2) {
-                app.exit_scroll_mode();
+            if app.mode == Mode::Scroll {
+                let past_bottom = app.move_cursor_down(2);
+                if past_bottom {
+                    app.exit_scroll_mode();
+                }
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {

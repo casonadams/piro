@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`tuitest` is a high-performance terminal command runner TUI written in Rust using [Ratatui](https://docs.rs/ratatui/latest/ratatui/) and [Crossterm](https://docs.rs/crossterm/latest/crossterm/). It delivers an asynchronous, non-blocking interface inspired by the pi.dev aesthetic:
+`piro` is a high-performance terminal command runner TUI written in Rust using [Ratatui](https://docs.rs/ratatui/latest/ratatui/) and [Crossterm](https://docs.rs/crossterm/latest/crossterm/). It delivers an asynchronous, non-blocking interface inspired by the pi.dev aesthetic:
 - A scrollable, bottom-anchored output feed above.
 - An empty space separator.
 - A horizontal-ruled command input prompt (clean lines, no side borders, no prompt symbol).
@@ -67,19 +67,24 @@ The application provides two operational modes:
 1. **Input Mode (`Mode::Input`)**:
    - Default mode. Active hardware cursor sits in the input prompt.
    - Keystrokes type commands; `Enter` runs them.
+   - **Keybindings & Actions**:
+     - `Ctrl+D`: Exit application (when prompt is empty) / delete char forward.
+     - `Ctrl+C`: Clear user input prompt immediately.
+     - `Esc`: Cancel active running command (or enter scroll mode if prompt is empty).
+     - `Ctrl+L`: Clear feed history (fresh canvas).
+     - `Ctrl+S` / `PageUp`: Enter Scroll Mode.
    - **Command History (Bash-Style Persistence)**:
-     - Automatically saves executed commands to `~/.tuitest_history` across sessions.
+     - Automatically saves executed commands to `~/.piro_history` across sessions.
      - `Up` / `Ctrl+P`: cycles backward through previous commands.
      - `Down` / `Ctrl+N`: cycles forward, restoring any in-progress draft.
      - Automatically deduplicates consecutive identical commands.
    - **Unix Readline Editing**:
-     - `Ctrl+W` / `Alt+Backspace`: bash `unix-word-rubout` (deletes backward across word to whitespace, including flags `--flag` and paths `src/main.rs`).
+     - `Ctrl+W` / `Alt+Backspace`: bash `unix-word-rubout` (deletes backward across word to whitespace).
      - `Ctrl+U`: kill line to start.
      - `Ctrl+K`: kill line to end.
      - `Ctrl+A` / `Home`: jump to start of line.
      - `Ctrl+E` / `End`: jump to end of line.
      - `Alt+B` / `Alt+F`: jump word backward / forward.
-   - `PageUp`, `Ctrl+S`, or `Esc` (when input is empty) enters **Scroll Mode**.
    - Footer displays ` READY ` (or ` RUNNING `).
 2. **Scroll Mode (`Mode::Scroll`)**:
    - Navigation & Cursor in feed:
@@ -89,7 +94,11 @@ The application provides two operational modes:
      - `PageDown` / `Ctrl+D`: move cursor down 10 lines
      - `g` / `Home`: jump to top of feed
      - `G` / `End`: jump to bottom of feed
-     - `i` / `q`: exit Scroll Mode and return to input prompt.
+   - **Exit & Yank Behavior**:
+     - `q`: **Drop out only** (returns to input prompt without clearing selection or moving cursor).
+     - `y`: **Yank and keep cursor where it is** (copies selection to clipboard, flashes `[Copied!]`, clears highlight, and remains in Scroll Mode).
+     - `Enter`: **Yank and return to input** (copies selection to clipboard, flashes `[Copied!]`, clears highlight, and returns to input prompt).
+     - `Esc`: Cancel active selection (or exit Scroll Mode if no selection).
    - **Unified Selection Model (Maki-Style)**:
      - **Mouse**:
        - **Scroll Up**: Enters Scroll Mode and scrolls up into history.

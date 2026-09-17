@@ -273,9 +273,13 @@ impl App {
     }
 
     fn history_file_path() -> Option<PathBuf> {
-        std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(|h| PathBuf::from(h).join(".tuitest_history"))
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        let piro_path = PathBuf::from(&home).join(".piro_history");
+        let legacy_path = PathBuf::from(&home).join(".tuitest_history");
+        if !piro_path.exists() && legacy_path.exists() {
+            let _ = std::fs::rename(&legacy_path, &piro_path);
+        }
+        Some(piro_path)
     }
 
     pub fn load_history(&mut self) {
