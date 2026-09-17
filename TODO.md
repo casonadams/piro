@@ -1,36 +1,42 @@
-### 2. Next Opportunities for Refinement
+### Completed Refinements & Features
 
-As we prepare to introduce more pi.dev agent functionality, here are the most
-impactful quality-of-life additions:
-
-┌───────────────────┬──────────────────────┬─────────────────────────────────┐
-│ Area              │ Current State        │ Natural Next Step               │
-├───────────────────┼──────────────────────┼─────────────────────────────────┤
-│ Command History   │ Single-use input     │ Up / Down arrows in Input Mode  │
-│                   │ buffer               │ to cycle through previously     │
-│                   │                      │ executed commands               │
-├───────────────────┼──────────────────────┼─────────────────────────────────┤
-│ Word Navigation   │ Single-character     │ Ctrl+W to delete word, Ctrl+A / │
-│                   │ cursor moves         │ Ctrl+E for start/end of line,   │
-│                   │                      │ Alt+B / Alt+F to skip words     │
-├───────────────────┼──────────────────────┼─────────────────────────────────┤
-│ ANSI Color        │ Stripped to plain    │ Preserve ANSI color codes (e.g. │
-│ Support           │ text for safety      │ green checkmarks in cargo test  │
-│                   │                      │ or colored ls) via ansi-to-tui  │
-├───────────────────┼──────────────────────┼─────────────────────────────────┤
-│ Agent / Tool Call │ User command + CLI   │ Add new FeedItem variants:      │
-│ Extensibility     │ output cards         │ AgentMessage, ToolExecution,    │
-│                   │                      │ DiffView                        │
-└───────────────────┴──────────────────────┴─────────────────────────────────┘
+┌───────────────────┬──────────────────────┬─────────────────────────────────┬───────────┐
+│ Area              │ Initial State        │ Delivered Solution              │ Status    │
+├───────────────────┼──────────────────────┼─────────────────────────────────┼───────────┤
+│ Command History   │ Single-use input     │ Persistent history buffer in    │ Completed │
+│                   │ buffer               │ ~/.piro/history with Up/Down    │           │
+│                   │                      │ & Ctrl+P/N cycling + dedupe     │           │
+├───────────────────┼──────────────────────┼─────────────────────────────────┼───────────┤
+│ Word Navigation   │ Single-character     │ Full Readline ergonomics:       │ Completed │
+│                   │ cursor moves         │ Ctrl+W, Ctrl+A/E, Alt+B/F,      │           │
+│                   │                      │ Ctrl+U/K                        │           │
+├───────────────────┼──────────────────────┼─────────────────────────────────┼───────────┤
+│ ANSI Color        │ Stripped to plain    │ Real-time ANSI escape parsing   │ Completed │
+│ Support           │ text                 │ via ansi-to-tui with full style │           │
+│                   │                      │ & border alignment              │           │
+├───────────────────┼──────────────────────┼─────────────────────────────────┼───────────┤
+│ Agent / Tool Call │ User command + CLI   │ FeedItem variants: Thought,     │ Completed │
+│ Extensibility     │ output cards only    │ ToolCall, AgentResponse with    │           │
+│                   │                      │ custom titled card renderers    │           │
+├───────────────────┼──────────────────────┼─────────────────────────────────┼───────────┤
+│ The ReAct Loop    │ None (one-off shell  │ Async state machine supervisor  │ Completed │
+│                   │ execution only)      │ with Tool trait, BashTool,      │           │
+│                   │                      │ MockAgentBackend, prompt        │           │
+│                   │                      │ routing (!, !!, prompt), and    │           │
+│                   │                      │ instant Esc/Ctrl+C cancellation │           │
+└───────────────────┴──────────────────────┴─────────────────────────────────┴───────────┘
 
 ──────────────────────────────────────────────────────────────────────────────
 
-### Verdict
+### Next Opportunities for Refinement
 
-The core foundation (async process execution, styled block feed, tmux visual
-selection, and clean split layout) is solid, responsive, and completely free
-of bloat.
+As `piro` evolves into an autonomous daily driver coding agent harness:
 
-
-
-Can we build a very very simple solid `the ReAct loop`?
+1. **Live LLM API Provider Integration**:
+   - Add streaming LLM backend (e.g. Anthropic Claude, OpenAI, Ollama) via lightweight HTTP/SSE client.
+2. **Additional Built-in Agent Tools**:
+   - `read_file` (with line numbering and windowing)
+   - `edit_file` / `write_file`
+   - `file_search` / `grep`
+3. **Interactive DiffView Block**:
+   - Add `FeedItem::DiffView` with side-by-side or unified red/green diff cards for file modifications.
