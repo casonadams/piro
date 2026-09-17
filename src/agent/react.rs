@@ -106,7 +106,7 @@ struct EngineLoopState<'a, H> {
 
 const MAX_OBSERVATION_LINES: usize = 200;
 const HEAD_LINES: usize = 120;
-const TAIL_LINES: usize = 80;
+const TAIL_LINES: usize = 79;
 
 pub fn truncate_observation_output(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
@@ -122,11 +122,17 @@ pub fn truncate_observation_output(output: &str) -> String {
     truncated.join("\n")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopAction {
+    Continue,
+    Finish,
+}
+
 async fn dispatch_tool<H: ReActHooks>(
     call: ToolCallRequest,
     ctx: &AgentContext,
     st: &mut EngineLoopState<'_, H>,
-) -> bool {
+) -> LoopAction {
     if !st.hooks.before_tool(&call) {
         let msg = format!("Tool '{}' blocked by policy", call.name);
         let _ = ctx.agent_tx.send(AgentEvent::Error(msg.clone()));
@@ -134,7 +140,7 @@ async fn dispatch_tool<H: ReActHooks>(
             output: msg,
             success: false,
         });
-        return false;
+        return LoopAction::Continue;
     }
 
     let _ = ctx.agent_tx.send(AgentEvent::ToolStart {
@@ -153,38 +159,38 @@ async fn dispatch_tool<H: ReActHooks>(
             output: err,
             success: false,
         });
-        return false;
+        return LoopAction::Continue;
     };
 
     let Some(res) = execute_tool_run(t, &call.input, ctx).await else {
-        return true;
+        return LoopAction::Finish;
     };
     st.hooks.after_tool(&call, &res);
     st.history.push(AgentMessage::Observation {
         output: truncate_observation_output(&res.output),
         success: res.success,
     });
-    false
+    LoopAction::Continue
 }
 
 async fn handle_engine_step<H: ReActHooks>(
     step: StepResult,
     ctx: &AgentContext,
     st: &mut EngineLoopState<'_, H>,
-) -> bool {
+) -> LoopAction {
     match step {
         StepResult::Thought(t) => {
             st.hooks.on_thought(&t);
             let _ = ctx.agent_tx.send(AgentEvent::Thought(t.clone()));
             st.history.push(AgentMessage::Thought(t));
-            false
+            LoopAction::Continue
         }
         StepResult::CallTool { tool: name, input } => dispatch_tool(ToolCallRequest { name, input }, ctx, st).await,
         StepResult::FinalAnswer(ans) => {
             st.hooks.on_complete(&ans);
             st.history.push(AgentMessage::Response(ans.clone()));
             let _ = ctx.agent_tx.send(AgentEvent::Response(ans));
-            true
+            LoopAction::Finish
         }
     }
 }
@@ -226,9 +232,29 @@ struct EngineRunParams<B, H> {
     history: Vec<AgentMessage>,
 }
 
+#[derive(Default)]
+struct RepetitionGuard {
+    last_call: Option<(String, String)>,
+    count: usize,
+}
+
+impl RepetitionGuard {
+    fn is_repetitive(&mut self, tool: &str, input: &str) -> bool {
+        if self.last_call.as_ref().map(|(t, i)| (t.as_str(), i.as_str())) == Some((tool, input)) {
+            self.count += 1;
+            self.count >= 3
+        } else {
+            self.last_call = Some((tool.to_string(), input.to_string()));
+            self.count = 1;
+            false
+        }
+    }
+}
+
 async fn run_engine_loop<B: AgentBackend, H: ReActHooks>(mut p: EngineRunParams<B, H>, ctx: AgentContext) {
     let max_steps = resolved_max_steps();
     let mut steps_taken = 0;
+    let mut guard = RepetitionGuard::default();
 
     loop {
         if let Some(limit) = max_steps
@@ -247,12 +273,20 @@ async fn run_engine_loop<B: AgentBackend, H: ReActHooks>(mut p: EngineRunParams<
                 break;
             }
         };
+        if let StepResult::CallTool { ref tool, ref input } = next
+            && guard.is_repetitive(tool, input)
+        {
+            let msg = format!("Terminated repetitive loop: tool '{}' called repeatedly.", tool);
+            let _ = ctx.agent_tx.send(AgentEvent::Response(msg.clone()));
+            p.history.push(AgentMessage::Response(msg));
+            break;
+        }
         let mut st = EngineLoopState {
             registry: &p.registry,
             hooks: &mut p.hooks,
             history: &mut p.history,
         };
-        if handle_engine_step(next, &ctx, &mut st).await {
+        if handle_engine_step(next, &ctx, &mut st).await == LoopAction::Finish {
             break;
         }
     }
@@ -396,12 +430,24 @@ mod tests {
         let long = (0..300).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
         let truncated = truncate_observation_output(&long);
         let lines: Vec<&str> = truncated.lines().collect();
-        assert_eq!(lines.len(), 201);
+        assert_eq!(lines.len(), 200);
         assert_eq!(lines[0], "line 0");
         assert_eq!(lines[119], "line 119");
-        assert_eq!(lines[120], "... [output truncated: 100 lines omitted] ...");
-        assert_eq!(lines[121], "line 220");
-        assert_eq!(lines[200], "line 299");
+        assert_eq!(lines[120], "... [output truncated: 101 lines omitted] ...");
+        assert_eq!(lines[121], "line 221");
+        assert_eq!(lines[199], "line 299");
+    }
+
+    #[test]
+    fn test_repetition_guard() {
+        let mut guard = RepetitionGuard::default();
+        assert!(!guard.is_repetitive("bash", "ls"));
+        assert!(!guard.is_repetitive("bash", "ls"));
+        // 3rd time is detected as repetitive
+        assert!(guard.is_repetitive("bash", "ls"));
+
+        // Different tool or args resets counter
+        assert!(!guard.is_repetitive("bash", "pwd"));
     }
 
     #[tokio::test]
