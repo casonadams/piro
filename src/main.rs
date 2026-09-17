@@ -5,8 +5,8 @@ mod ui;
 
 use std::time::Duration;
 
-use app::App;
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers, MouseEventKind};
+use app::{App, Mode};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
 use futures_util::StreamExt;
 use runner::{RunnerMsg, spawn_command};
 use terminal::TerminalGuard;
@@ -36,46 +36,11 @@ async fn main() -> std::io::Result<()> {
             Some(Ok(event)) = reader.next() => {
                 match event {
                     CrosstermEvent::Key(key) => {
-                        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                            if !app.cancel_active() {
-                                app.running = false;
-                            }
-                        } else {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    if !app.cancel_active() {
-                                        app.running = false;
-                                    }
-                                }
-                                KeyCode::PageUp => app.scroll_up(10),
-                                KeyCode::PageDown => app.scroll_down(10),
-                                KeyCode::Enter => {
-                                    let cmd = app.input.take_value().trim().to_string();
-                                    if !cmd.is_empty() {
-                                        if app.is_command_running() {
-                                            app.append_output_line("Command already running, press Ctrl+C to cancel.".into());
-                                        } else {
-                                            let handle = spawn_command(cmd.clone(), runner_tx.clone());
-                                            app.add_command(cmd, handle);
-                                        }
-                                    }
-                                }
-                                KeyCode::Char(c) => app.input.insert(c),
-                                KeyCode::Backspace => app.input.delete_back(),
-                                KeyCode::Delete => app.input.delete_forward(),
-                                KeyCode::Left => app.input.move_left(),
-                                KeyCode::Right => app.input.move_right(),
-                                KeyCode::Home => app.input.move_start(),
-                                KeyCode::End => app.input.move_end(),
-                                _ => {}
-                            }
+                        match app.mode {
+                            Mode::Input => handle_input_mode_key(&mut app, key, &runner_tx),
+                            Mode::Scroll => handle_scroll_mode_key(&mut app, key),
                         }
                     }
-                    CrosstermEvent::Mouse(mouse) => match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
-                        _ => {}
-                    },
                     CrosstermEvent::Resize(_, _) => {}
                     _ => {}
                 }
@@ -84,4 +49,92 @@ async fn main() -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_tx: &mpsc::UnboundedSender<RunnerMsg>) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                if !app.cancel_active() {
+                    app.running = false;
+                }
+            }
+            KeyCode::Char('s') => {
+                app.enter_scroll_mode();
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            if !app.cancel_active() {
+                if app.input.value().is_empty() {
+                    app.enter_scroll_mode();
+                } else {
+                    let _ = app.input.take_value();
+                }
+            }
+        }
+        KeyCode::PageUp => {
+            app.enter_scroll_mode();
+            app.scroll_up(10);
+        }
+        KeyCode::PageDown => {
+            app.scroll_down(10);
+        }
+        KeyCode::Enter => {
+            let cmd = app.input.take_value().trim().to_string();
+            if !cmd.is_empty() {
+                if app.is_command_running() {
+                    app.append_output_line("Command already running, press Ctrl+C to cancel.".into());
+                } else {
+                    let handle = spawn_command(cmd.clone(), runner_tx.clone());
+                    app.add_command(cmd, handle);
+                }
+            }
+        }
+        KeyCode::Char(c) => app.input.insert(c),
+        KeyCode::Backspace => app.input.delete_back(),
+        KeyCode::Delete => app.input.delete_forward(),
+        KeyCode::Left => app.input.move_left(),
+        KeyCode::Right => app.input.move_right(),
+        KeyCode::Home => app.input.move_start(),
+        KeyCode::End => app.input.move_end(),
+        _ => {}
+    }
+}
+
+fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => {
+                app.exit_scroll_mode();
+            }
+            KeyCode::Char('u') => {
+                app.scroll_up(10);
+            }
+            KeyCode::Char('d') => {
+                app.scroll_down(10);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
+        // Exit scroll mode back to input prompt
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') | KeyCode::Enter => {
+            app.exit_scroll_mode();
+        }
+        // Scrolling
+        KeyCode::Up | KeyCode::Char('k') => app.scroll_up(1),
+        KeyCode::Down | KeyCode::Char('j') => app.scroll_down(1),
+        KeyCode::PageUp => app.scroll_up(10),
+        KeyCode::PageDown => app.scroll_down(10),
+        KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
+        _ => {}
+    }
 }

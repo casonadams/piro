@@ -27,13 +27,14 @@ src/
 ### Module Responsibilities
 
 - **`src/main.rs`**: Directly multiplexes terminal events, background process messages, and timer ticks via `tokio::select!`.
-  - Avoids wrapper threads, intermediate event queues, or custom channel layers.
+  - Routes keys based on `app.mode` (`Mode::Input` vs `Mode::Scroll`).
   - Direct selection on `crossterm::event::EventStream`, `tokio::sync::mpsc::UnboundedReceiver<RunnerMsg>`, and `tokio::time::Interval`.
 - **`src/app.rs`**:
-  - `InputState`: Lean, UTF-8-safe text entry buffer using string byte indexing. Avoids allocating `Vec<char>` on keystrokes.
+  - `Mode`: Enum with `Input` and `Scroll`.
+  - `InputState`: Lean, UTF-8-safe text entry buffer using string byte indexing.
   - `ScrollState`: Virtual scroll calculations with sticky auto-scroll when at the bottom, and manual scrollback offset tracking.
   - `FeedItem`: `UserInput(String)` and `CommandOutput(CommandOutputBlock)`.
-  - `App`: Central state store managing process `AbortHandle`, input state, and feed history.
+  - `App`: Central state store managing process `AbortHandle`, input state, mode, and feed history.
 - **`src/runner.rs`**: Executes commands asynchronously via `$SHELL -c` (fallback to `/bin/sh -c`), streaming stdout and stderr line-by-line while stripping raw ANSI escape sequences. Uses Tokio's native `AbortHandle` for instant cancellation on `Ctrl+C`.
 - **`src/terminal.rs`**: RAII `TerminalGuard` enabling raw mode, alternate screen, and mouse capture. Installs a custom panic hook ensuring the terminal is restored to normal mode under all crash conditions.
 - **`src/ui/`**: Modular presentation layer.
@@ -59,6 +60,30 @@ All future contributions and modifications MUST adhere to these strict size and 
    - Maintain `ratatui` with `default-features = false, features = ["crossterm", "std"]` to avoid transitive calendar/time dependencies.
 4. **Release Profile Configuration**:
    - Keep `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, and `strip = true` in `[profile.release]`.
+
+## Scroll Mode & Copy Behavior (Tmux-Style)
+
+The application provides two operational modes:
+1. **Input Mode (`Mode::Input`)**:
+   - Default mode. Active hardware cursor sits in the input prompt.
+   - Keystrokes type commands; `Enter` runs them.
+   - `PageUp`, `Ctrl+S`, or `Esc` (when input is empty) enters **Scroll Mode**.
+   - Footer displays ` READY ` (or ` RUNNING `).
+2. **Scroll Mode (`Mode::Scroll`)**:
+   - Input cursor is hidden.
+   - Navigation keys:
+     - `k` / `Up`: scroll up 1 line
+     - `j` / `Down`: scroll down 1 line
+     - `PageUp` / `Ctrl+U`: scroll up 10 lines
+     - `PageDown` / `Ctrl+D`: scroll down 10 lines
+     - `g` / `Home`: scroll to top
+     - `G` / `End`: scroll to bottom
+     - `i` / `q` / `Esc` / `Enter`: exit Scroll Mode and return to the input prompt.
+   - **Text Selection & Copy**:
+     - Mouse capture is not enabled, allowing the native OS terminal to click and drag across any text on screen.
+     - Pressing `Cmd+C` copies highlighted text directly to the system clipboard.
+   - Footer displays:
+     ` SCROLL MODE   [↑/↓/PgUp/PgDn/jk] Scroll  [Mouse drag to copy]  [i/q/Esc] Return `
 
 ## UI & Layout Invariants
 

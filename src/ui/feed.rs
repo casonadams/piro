@@ -40,6 +40,7 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let (start, end) = app.scroll.visible_range(lines.len(), view_h);
     let mut visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(end - start).collect();
 
+    // Bottom-anchor content if it fits within the viewport height
     if visible.len() < view_h && app.scroll.auto_scroll {
         let pad = view_h - visible.len();
         let mut padded = vec![Line::from(""); pad];

@@ -39,7 +39,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_feed(frame, feed_area, app);
     draw_empty_separator(frame, empty_sep_area);
-    draw_input(frame, input_area, &app.input);
+    draw_input(frame, input_area, app);
     draw_footer(frame, footer_area, app);
 }
 

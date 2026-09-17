@@ -1,10 +1,17 @@
 use std::time::{Duration, Instant};
 use tokio::task::AbortHandle;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Input,
+    Scroll,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct InputState {
     value: String,
-    cursor: usize, // character index
+    cursor: usize,
 }
 
 impl InputState {
@@ -123,6 +130,13 @@ impl ScrollState {
         }
     }
 
+    pub fn scroll_to_top(&mut self, total_lines: usize, viewport_height: usize) {
+        if total_lines > viewport_height {
+            self.scroll_from_bottom = total_lines - viewport_height;
+            self.auto_scroll = false;
+        }
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_from_bottom = 0;
         self.auto_scroll = true;
@@ -145,6 +159,7 @@ impl ScrollState {
 
 pub struct App {
     pub running: bool,
+    pub mode: Mode,
     pub input: InputState,
     pub feed: Vec<FeedItem>,
     pub scroll: ScrollState,
@@ -157,6 +172,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             running: true,
+            mode: Mode::Input,
             input: InputState::default(),
             feed: Vec::new(),
             scroll: ScrollState::new(),
@@ -217,6 +233,14 @@ impl App {
         }
     }
 
+    pub fn enter_scroll_mode(&mut self) {
+        self.mode = Mode::Scroll;
+    }
+
+    pub fn exit_scroll_mode(&mut self) {
+        self.mode = Mode::Input;
+    }
+
     pub fn scroll_up(&mut self, delta: usize) {
         self.scroll
             .scroll_up(delta, self.total_feed_lines, self.viewport_height);
@@ -224,6 +248,14 @@ impl App {
 
     pub fn scroll_down(&mut self, delta: usize) {
         self.scroll.scroll_down(delta);
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll.scroll_to_top(self.total_feed_lines, self.viewport_height);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll.scroll_to_bottom();
     }
 }
 
