@@ -8,6 +8,25 @@ pub struct HttpRequest<'a> {
     pub auth_token: Option<&'a str>,
 }
 
+pub async fn get_json(url: &str) -> Result<String, String> {
+    let output = Command::new("curl")
+        .arg("-s")
+        .arg("-S")
+        .arg(url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to spawn curl: {}", e))?;
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("curl error: {}", err));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| format!("Invalid UTF-8 from curl: {}", e))
+}
+
 pub async fn post_json(req: HttpRequest<'_>) -> Result<String, String> {
     let mut cmd = Command::new("curl");
     cmd.arg("-s")
