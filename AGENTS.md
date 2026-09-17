@@ -7,29 +7,6 @@
 - Horizontal-ruled command prompt: clean lines, no side borders, no prompt glyph.
 - Minimal status bar with mode badges (`READY`, `RUNNING`, `THINKING`, `SCROLL`, `VISUAL`).
 
-## Architecture & Codebase Map
-
-```
-src/
-├── main.rs       # Entry point, tokio::select! loop, and terminal event multiplexing
-├── events.rs     # Key & mouse dispatch (InputCtx, ScrollCtx, NavBounds)
-├── app.rs        # Domain state (App, FeedItem, CommandOutputBlock, ScrollState)
-├── runner.rs     # Async subprocess runner ($SHELL -c), process groups, SIGKILL
-├── terminal.rs   # Raw mode, alternate screen, mouse capture, panic recovery
-├── clipboard.rs  # OSC 52 and platform clipboard integrations
-├── agent/
-│   ├── mod.rs    # ReAct loop supervisor, AgentEvent stream, AgentHandle
-│   ├── tool.rs   # Tool trait, BashTool, ToolRegistry
-│   └── backend.rs# AgentBackend trait, AgentMessage, MockAgentBackend
-└── ui/
-    ├── mod.rs    # Master layout (Feed, Separator, Input, Footer)
-    ├── feed.rs   # Virtual scrolling, selection slicing, text extraction
-    ├── blocks.rs # Titled cards: UserInput, CommandOutput (tools), Thought, Agent
-    ├── input.rs  # Input prompt bordered by top/bottom divider rules
-    ├── footer.rs # Status badges and active scrollback notifications
-    └── text.rs   # ANSI-aware word wrapping and display width calculation
-```
-
 ## Engineering Rigor & Code Invariants
 
 1. **Function Size & Struct Convention**:

@@ -1,10 +1,17 @@
+pub mod http;
+pub mod ollama;
+pub mod openai;
+
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
 use crate::agent::react::{AgentEvent, ToolCallRequest};
-use crate::agent::tool::ToolDefinition;
+use crate::agent::tool::{ToolDefinition, ToolRegistry};
+
+pub use ollama::OllamaProvider;
+pub use openai::{OpenAiConfig, OpenAiProvider};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LlmResponse {
@@ -98,6 +105,85 @@ impl<P: LlmProvider> AgentBackend for ProviderBackend<P> {
     }
 }
 
+pub enum AnyProvider {
+    Ollama(OllamaProvider),
+    OpenAi(OpenAiProvider),
+}
+
+impl LlmProvider for AnyProvider {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
+        match self {
+            Self::Ollama(p) => p.chat_stream(params).await,
+            Self::OpenAi(p) => p.chat_stream(params).await,
+        }
+    }
+}
+
+pub struct ModelSpec<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+}
+
+pub fn parse_model_spec(spec: &str) -> ModelSpec<'_> {
+    if let Some((prov, model)) = spec.split_once('/') {
+        ModelSpec {
+            provider: prov.trim(),
+            model: model.trim(),
+        }
+    } else {
+        ModelSpec {
+            provider: "ollama",
+            model: spec.trim(),
+        }
+    }
+}
+
+pub fn provider_from_spec(spec: &str) -> Result<AnyProvider, String> {
+    let parsed = parse_model_spec(spec);
+    if parsed.model.is_empty() {
+        return Err("Model name cannot be empty".into());
+    }
+    match parsed.provider.to_lowercase().as_str() {
+        "ollama" => {
+            if let Ok(host) = std::env::var("OLLAMA_HOST") {
+                Ok(AnyProvider::Ollama(OllamaProvider::with_base_url(
+                    host,
+                    parsed.model.into(),
+                )))
+            } else {
+                Ok(AnyProvider::Ollama(OllamaProvider::new(parsed.model.into())))
+            }
+        }
+        "openai" => {
+            let key = std::env::var("OPENAI_API_KEY").ok();
+            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
+            Ok(AnyProvider::OpenAi(OpenAiProvider::new(OpenAiConfig {
+                base_url,
+                model: parsed.model.into(),
+                api_key: key,
+            })))
+        }
+        unsupported => Err(format!(
+            "Unsupported provider '{}'. Supported providers: 'ollama', 'openai'",
+            unsupported
+        )),
+    }
+}
+
+pub fn create_backend(spec: &str, registry: &ToolRegistry) -> Result<ProviderBackend<AnyProvider>, String> {
+    let provider = provider_from_spec(spec)?;
+    Ok(ProviderBackend::new(provider, registry.definitions()))
+}
+
+pub fn default_provider() -> AnyProvider {
+    let spec = std::env::var("PIRO_MODEL").unwrap_or_else(|_| "ollama/ornith-1.5:35b".into());
+    provider_from_spec(&spec).unwrap_or_else(|_| AnyProvider::Ollama(OllamaProvider::new("ornith-1.5:35b".into())))
+}
+
+pub fn default_backend(registry: &ToolRegistry) -> ProviderBackend<AnyProvider> {
+    ProviderBackend::new(default_provider(), registry.definitions())
+}
+
 #[cfg(test)]
 #[derive(Default)]
 pub struct MockProvider {
@@ -184,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_engine_with_provider_backend() {
-        let registry = crate::agent::tool::ToolRegistry::with_defaults();
+        let registry = ToolRegistry::with_defaults();
         let provider = MockProvider::from_responses(vec![
             LlmResponse {
                 thinking: Some("Running bash echo".into()),
@@ -202,27 +288,30 @@ mod tests {
         ]);
         let backend = ProviderBackend::new(provider, registry.definitions());
         let engine = crate::agent::ReActEngine::new(backend, registry);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let _handle = engine.spawn("run provider".into(), tx);
 
         let mut events = Vec::new();
         while let Some(ev) = rx.recv().await {
-            let is_fin = matches!(ev, crate::agent::AgentEvent::Finished);
+            let is_fin = matches!(ev, AgentEvent::Finished);
             events.push(ev);
             if is_fin {
                 break;
             }
         }
-        assert!(events.iter().any(|e| matches!(e, crate::agent::AgentEvent::Thought(_))));
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, crate::agent::AgentEvent::ToolStart { .. }))
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, crate::agent::AgentEvent::Response(_)))
-        );
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Thought(_))));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolStart { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Response(_))));
+    }
+
+    #[test]
+    fn test_parse_model_spec() {
+        let spec = parse_model_spec("ollama/qwen");
+        assert_eq!(spec.provider, "ollama");
+        assert_eq!(spec.model, "qwen");
+
+        let default_prov = parse_model_spec("gpt-4o");
+        assert_eq!(default_prov.provider, "ollama");
+        assert_eq!(default_prov.model, "gpt-4o");
     }
 }

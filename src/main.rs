@@ -3,6 +3,7 @@ mod app;
 mod cli;
 mod clipboard;
 mod events;
+mod provider;
 mod runner;
 mod terminal;
 mod ui;
@@ -59,7 +60,7 @@ fn dispatch_terminal_event(app: &mut App, input: TerminalInput, ch: &mut LoopCha
 fn init_app() -> Result<App, String> {
     let args = cli::parse_args(std::env::args())?;
     if let Some(spec) = &args.model {
-        agent::provider_from_spec(spec)?;
+        provider::provider_from_spec(spec)?;
     }
     Ok(App::new(app::AppOptions { model_spec: args.model }))
 }
@@ -128,8 +129,8 @@ fn handle_runner_msg(app: &mut App, msg: RunnerMsg, agent_tx: &mpsc::UnboundedSe
                 let prompt = format!("Executed '{}'. Output:\n{}", cmd, output);
                 app.agent_history.push(agent::AgentMessage::User(prompt.clone()));
                 let registry = ToolRegistry::with_defaults();
-                let backend = agent::create_backend(&app.model_spec, &registry)
-                    .unwrap_or_else(|_| agent::default_backend(&registry))
+                let backend = provider::create_backend(&app.model_spec, &registry)
+                    .unwrap_or_else(|_| provider::default_backend(&registry))
                     .with_delta_tx(agent_tx.clone());
                 let config = AgentConfig {
                     prompt,

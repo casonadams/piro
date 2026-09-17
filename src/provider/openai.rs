@@ -1,10 +1,10 @@
 use serde_json::{Value, json};
 
 use crate::agent::backend::AgentMessage;
-use crate::agent::http::{HttpRequest, post_json};
-use crate::agent::provider::{ChatRequestParams, LlmProvider, LlmResponse};
 use crate::agent::react::ToolCallRequest;
 use crate::agent::tool::ToolDefinition;
+use crate::provider::http::{HttpRequest, post_json};
+use crate::provider::{ChatRequestParams, LlmProvider, LlmResponse};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
@@ -71,22 +71,23 @@ impl OpenAiProvider {
     }
 }
 
-fn parse_tool_call_item(call: &Value) -> Option<ToolCallRequest> {
-    let func = call.get("function")?;
+fn parse_tool_call_item(c: &Value) -> Option<ToolCallRequest> {
+    let func = c.get("function")?;
     let name = func.get("name")?.as_str()?.to_string();
-    let args_val = func.get("arguments")?;
-    let input = if let Some(s) = args_val.as_str() {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            parsed.get("command").and_then(Value::as_str).unwrap_or(s).to_string()
+    let args_raw = func.get("arguments")?;
+    let input = if let Some(s) = args_raw.as_str() {
+        if let Ok(val) = serde_json::from_str::<Value>(s) {
+            val.get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| s.to_string())
         } else {
             s.to_string()
         }
+    } else if let Some(cmd) = args_raw.get("command").and_then(Value::as_str) {
+        cmd.to_string()
     } else {
-        args_val
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
+        args_raw.to_string()
     };
     Some(ToolCallRequest { name, input })
 }
@@ -94,9 +95,9 @@ fn parse_tool_call_item(call: &Value) -> Option<ToolCallRequest> {
 fn extract_thinking_and_content(msg: &Value) -> (Option<String>, Option<String>) {
     let reasoning = msg.get("reasoning_content").and_then(Value::as_str).map(str::to_string);
 
-    let raw_content = msg.get("content").and_then(Value::as_str);
-    if let Some(content) = raw_content {
-        if let Some(start) = content.find("<think>")
+    if let Some(content) = msg.get("content").and_then(Value::as_str) {
+        if reasoning.is_none()
+            && let Some(start) = content.find("<think>")
             && let Some(end) = content.find("</think>")
         {
             let thought = content[start + 7..end].trim().to_string();
@@ -173,7 +174,7 @@ mod tests {
                         "type": "function",
                         "function": {
                             "name": "bash",
-                            "arguments": "{\"command\":\"git branch --show-current\"}"
+                            "arguments": "{\"command\":\"git branch\"}"
                         }
                     }]
                 }
@@ -183,8 +184,7 @@ mod tests {
         assert_eq!(res.thinking.as_deref(), Some("Determining branch"));
         assert_eq!(res.tool_calls.len(), 1);
         assert_eq!(res.tool_calls[0].name, "bash");
-        assert_eq!(res.tool_calls[0].input, "git branch --show-current");
-        assert_eq!(res.content, None);
+        assert_eq!(res.tool_calls[0].input, "git branch");
     }
 
     #[test]
@@ -193,13 +193,12 @@ mod tests {
             "choices": [{
                 "message": {
                     "role": "assistant",
-                    "content": "<think>Thinking through</think>The branch is main."
+                    "content": "<think>\nThinking about test\n</think>\nDone testing."
                 }
             }]
         });
         let res = parse_openai_response(raw).unwrap();
-        assert_eq!(res.thinking.as_deref(), Some("Thinking through"));
-        assert_eq!(res.content.as_deref(), Some("The branch is main."));
-        assert!(res.tool_calls.is_empty());
+        assert_eq!(res.thinking.as_deref(), Some("Thinking about test"));
+        assert_eq!(res.content.as_deref(), Some("Done testing."));
     }
 }

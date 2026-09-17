@@ -67,8 +67,8 @@ pub fn submit_input(
         }
         InputIntent::AgentPrompt(prompt) => {
             let registry = ToolRegistry::with_defaults();
-            let backend = crate::agent::create_backend(&app.model_spec, &registry)
-                .unwrap_or_else(|_| crate::agent::default_backend(&registry))
+            let backend = crate::provider::create_backend(&app.model_spec, &registry)
+                .unwrap_or_else(|_| crate::provider::default_backend(&registry))
                 .with_delta_tx(agent_tx.clone());
             let config = crate::agent::AgentConfig {
                 prompt: prompt.clone(),

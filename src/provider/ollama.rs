@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::agent::backend::AgentMessage;
-use crate::agent::http::{HttpRequest, post_json, post_request};
-use crate::agent::provider::{ChatRequestParams, LlmProvider, LlmResponse};
 use crate::agent::react::{AgentEvent, ToolCallRequest};
 use crate::agent::tool::ToolDefinition;
+use crate::provider::http::{HttpRequest, post_json, post_request};
+use crate::provider::{ChatRequestParams, LlmProvider, LlmResponse};
 
 /// Fallback when `/api/show` is unreachable or returns no context length.
 const OLLAMA_DEFAULT_CTX: u64 = 8192;
