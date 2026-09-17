@@ -107,6 +107,7 @@ fn handle_input_ctrl(app: &mut App, code: KeyCode, ctx: &mut InputCtx) {
         KeyCode::Char('e') => app.input.move_end(),
         KeyCode::Char('u') => app.input.delete_line(),
         KeyCode::Char('k') => app.input.delete_to_end(),
+        KeyCode::Char('j') | KeyCode::Enter => app.input.insert('\n'),
         _ => {}
     }
 }
@@ -131,8 +132,16 @@ fn handle_input_plain(app: &mut App, code: KeyCode, ctx: &mut InputCtx) {
                 let _ = app.input.take_value();
             }
         }
-        KeyCode::Up => app.history_prev(),
-        KeyCode::Down => app.history_next(),
+        KeyCode::Up => {
+            if !app.input.move_up() {
+                app.history_prev();
+            }
+        }
+        KeyCode::Down => {
+            if !app.input.move_down() {
+                app.history_next();
+            }
+        }
         KeyCode::PageUp => {
             app.enter_scroll_mode();
             app.move_cursor_up(app.viewport_height.max(1));
@@ -305,5 +314,49 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, width: usize) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn test_ctrl_j_inserts_newline_and_arrow_navigation() {
+        let mut app = App::default();
+        let (runner_tx, mut runner_rx) = mpsc::unbounded_channel();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let mut ctx = InputCtx {
+            runner_tx: &runner_tx,
+            runner_rx: &mut runner_rx,
+            agent_tx: &agent_tx,
+            agent_rx: &mut agent_rx,
+        };
+
+        app.input.insert('a');
+        handle_input_key(&mut app, make_key(KeyCode::Char('j'), KeyModifiers::CONTROL), &mut ctx);
+        app.input.insert('b');
+
+        assert_eq!(app.input.value(), "a\nb");
+        assert_eq!(app.input.line_count(), 2);
+        assert_eq!(app.input.cursor_coords(), (1, 1));
+
+        // Up moves to line 0
+        handle_input_key(&mut app, make_key(KeyCode::Up, KeyModifiers::NONE), &mut ctx);
+        assert_eq!(app.input.cursor_coords(), (1, 0));
+
+        // Down moves back to line 1
+        handle_input_key(&mut app, make_key(KeyCode::Down, KeyModifiers::NONE), &mut ctx);
+        assert_eq!(app.input.cursor_coords(), (1, 1));
     }
 }

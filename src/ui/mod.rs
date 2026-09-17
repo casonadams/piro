@@ -23,13 +23,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // <empty space separator> (1 empty row)
     // <user input area> (3 rows: top line, text row, bottom line)
     // <footer area> (1 row, status badge + scroll notification)
+    let input_height = (app.input.line_count() as u16 + 2).clamp(3, 12);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // Output feed
-            Constraint::Length(1), // Empty space separator
-            Constraint::Length(3), // User input area (top line, text row, bottom line)
-            Constraint::Length(1), // Footer
+            Constraint::Min(1),               // Output feed
+            Constraint::Length(1),            // Empty space separator
+            Constraint::Length(input_height), // User input area (top rule, text rows, bottom rule)
+            Constraint::Length(1),            // Footer
         ])
         .split(size);
 

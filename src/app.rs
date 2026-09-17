@@ -73,8 +73,57 @@ impl InputState {
     pub fn value(&self) -> &str {
         &self.value
     }
-    pub fn cursor(&self) -> usize {
-        self.cursor
+
+    pub fn line_count(&self) -> usize {
+        self.value.split('\n').count()
+    }
+
+    pub fn cursor_coords(&self) -> (usize, usize) {
+        let mut row = 0;
+        let mut col = 0;
+        for (idx, c) in self.value.chars().enumerate() {
+            if idx == self.cursor {
+                return (col, row);
+            }
+            if c == '\n' {
+                row += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        (col, row)
+    }
+
+    pub fn move_up(&mut self) -> bool {
+        let (cur_col, cur_row) = self.cursor_coords();
+        if cur_row == 0 {
+            return false;
+        }
+        self.cursor = self.char_idx_for_coords(cur_col, cur_row - 1);
+        true
+    }
+
+    pub fn move_down(&mut self) -> bool {
+        let (cur_col, cur_row) = self.cursor_coords();
+        let total_lines = self.line_count();
+        if cur_row + 1 >= total_lines {
+            return false;
+        }
+        self.cursor = self.char_idx_for_coords(cur_col, cur_row + 1);
+        true
+    }
+
+    fn char_idx_for_coords(&self, col: usize, target_row: usize) -> usize {
+        let mut char_idx = 0;
+        for (row, line) in self.value.split('\n').enumerate() {
+            let line_len = line.chars().count();
+            if row == target_row {
+                return char_idx + col.min(line_len);
+            }
+            char_idx += line_len + 1;
+        }
+        self.value.chars().count()
     }
 
     fn byte_idx(&self) -> usize {
@@ -704,5 +753,69 @@ mod tests {
         app.clear_feed_and_agent_context();
         assert!(app.agent_history.is_empty());
         assert!(app.feed.is_empty());
+    }
+
+    #[test]
+    fn test_input_cursor_coords() {
+        let mut input = InputState::default();
+        assert_eq!(input.line_count(), 1);
+        assert_eq!(input.cursor_coords(), (0, 0));
+
+        input.set_value("first\nsecond\nthird".into());
+        assert_eq!(input.line_count(), 3);
+        // set_value puts cursor at the very end (col 5, row 2)
+        assert_eq!(input.cursor_coords(), (5, 2));
+
+        input.move_start();
+        assert_eq!(input.cursor_coords(), (0, 0));
+
+        // Move to right 5 times -> end of "first"
+        for _ in 0..5 {
+            input.move_right();
+        }
+        assert_eq!(input.cursor_coords(), (5, 0));
+
+        // Move right 1 more -> starts "second"
+        input.move_right();
+        assert_eq!(input.cursor_coords(), (0, 1));
+    }
+
+    #[test]
+    fn test_input_vertical_movement() {
+        let mut input = InputState::default();
+        input.set_value("short\nlonger line\nabc".into());
+
+        // Cursor starts at end: "abc", row 2, col 3
+        assert_eq!(input.cursor_coords(), (3, 2));
+
+        // Move down when already on bottom row -> returns false
+        assert!(!input.move_down());
+        assert_eq!(input.cursor_coords(), (3, 2));
+
+        // Move up to "longer line" -> row 1, col 3
+        assert!(input.move_up());
+        assert_eq!(input.cursor_coords(), (3, 1));
+
+        // Move to end of "longer line" (col 11, row 1)
+        for _ in 0..8 {
+            input.move_right();
+        }
+        assert_eq!(input.cursor_coords(), (11, 1));
+
+        // Move up to "short" (length 5) -> clamps to col 5, row 0
+        assert!(input.move_up());
+        assert_eq!(input.cursor_coords(), (5, 0));
+
+        // Move up when already on top row -> returns false
+        assert!(!input.move_up());
+        assert_eq!(input.cursor_coords(), (5, 0));
+
+        // Move down back to "longer line" -> row 1, col 5
+        assert!(input.move_down());
+        assert_eq!(input.cursor_coords(), (5, 1));
+
+        // Move down to "abc" (length 3) -> clamps to col 3, row 2
+        assert!(input.move_down());
+        assert_eq!(input.cursor_coords(), (3, 2));
     }
 }
