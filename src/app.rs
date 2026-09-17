@@ -36,68 +36,31 @@ impl Ord for DocPos {
 
 #[derive(Debug, Default, Clone)]
 pub struct InputState {
-    value: String,
-    cursor: usize,
+    inner: tui_input::Input,
 }
 
 impl InputState {
     pub fn value(&self) -> &str {
-        &self.value
+        self.inner.value()
     }
 
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.inner.visual_cursor()
     }
 
-    fn byte_index(&self) -> usize {
-        self.value
-            .char_indices()
-            .nth(self.cursor)
-            .map_or(self.value.len(), |(i, _)| i)
+    pub fn handle_event(&mut self, event: &crossterm::event::Event) {
+        use tui_input::backend::crossterm::EventHandler;
+        self.inner.handle_event(event);
     }
 
-    pub fn insert(&mut self, c: char) {
-        let idx = self.byte_index();
-        self.value.insert(idx, c);
-        self.cursor += 1;
-    }
-
-    pub fn delete_back(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            let idx = self.byte_index();
-            self.value.remove(idx);
-        }
-    }
-
-    pub fn delete_forward(&mut self) {
-        if self.cursor < self.value.chars().count() {
-            let idx = self.byte_index();
-            self.value.remove(idx);
-        }
-    }
-
-    pub fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    pub fn move_right(&mut self) {
-        if self.cursor < self.value.chars().count() {
-            self.cursor += 1;
-        }
-    }
-
-    pub fn move_start(&mut self) {
-        self.cursor = 0;
-    }
-
-    pub fn move_end(&mut self) {
-        self.cursor = self.value.chars().count();
+    pub fn set_value(&mut self, val: String) {
+        self.inner = tui_input::Input::new(val);
     }
 
     pub fn take_value(&mut self) -> String {
-        self.cursor = 0;
-        std::mem::take(&mut self.value)
+        let val = self.inner.value().to_string();
+        self.inner.reset();
+        val
     }
 }
 
@@ -195,6 +158,9 @@ pub struct App {
     pub selection_anchor: Option<DocPos>,
     pub selection_type: SelectionType,
     pub copied_flash: bool,
+    pub history: Vec<String>,
+    pub history_idx: Option<usize>,
+    pub draft_input: String,
     pub active_abort: Option<AbortHandle>,
 }
 
@@ -212,6 +178,9 @@ impl App {
             selection_anchor: None,
             selection_type: SelectionType::Char,
             copied_flash: false,
+            history: Vec::new(),
+            history_idx: None,
+            draft_input: String::new(),
             active_abort: None,
         }
     }
@@ -221,6 +190,15 @@ impl App {
     }
 
     pub fn add_command(&mut self, command: String, handle: AbortHandle) {
+        if self.history.last().map(|s| s.as_str()) != Some(&command) {
+            if self.history.len() >= 500 {
+                self.history.remove(0);
+            }
+            self.history.push(command.clone());
+        }
+        self.history_idx = None;
+        self.draft_input.clear();
+
         self.feed.push(FeedItem::UserInput(command.clone()));
         self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command,
@@ -231,6 +209,35 @@ impl App {
         }));
         self.active_abort = Some(handle);
         self.scroll.scroll_to_bottom();
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next_idx = match self.history_idx {
+            None => {
+                self.draft_input = self.input.value().to_string();
+                self.history.len().saturating_sub(1)
+            }
+            Some(idx) => idx.saturating_sub(1),
+        };
+        self.history_idx = Some(next_idx);
+        self.input.set_value(self.history[next_idx].clone());
+    }
+
+    pub fn history_next(&mut self) {
+        let Some(idx) = self.history_idx else {
+            return;
+        };
+        if idx + 1 < self.history.len() {
+            let next_idx = idx + 1;
+            self.history_idx = Some(next_idx);
+            self.input.set_value(self.history[next_idx].clone());
+        } else {
+            self.history_idx = None;
+            self.input.set_value(std::mem::take(&mut self.draft_input));
+        }
     }
 
     pub fn append_output_line(&mut self, line: String) {
@@ -397,20 +404,29 @@ mod tests {
 
     #[test]
     fn test_input_state() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
         let mut input = InputState::default();
-        input.insert('a');
-        input.insert('b');
-        input.insert('c');
-        assert_eq!(input.value(), "abc");
-        assert_eq!(input.cursor(), 3);
+        let key_a = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+        let key_b = Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
+        input.handle_event(&key_a);
+        input.handle_event(&key_b);
+        assert_eq!(input.value(), "ab");
+        assert_eq!(input.cursor(), 2);
 
-        input.move_left();
-        input.delete_back();
-        assert_eq!(input.value(), "ac");
+        // Test Ctrl+W word deletion
+        let key_space = Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty()));
+        let key_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
+        let key_ctrl_w = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
 
-        input.delete_forward();
-        assert_eq!(input.value(), "a");
-        assert_eq!(input.take_value(), "a");
+        input.handle_event(&key_space);
+        input.handle_event(&key_c);
+        assert_eq!(input.value(), "ab c");
+
+        input.handle_event(&key_ctrl_w);
+        assert_eq!(input.value(), "ab ");
+
+        assert_eq!(input.take_value(), "ab ");
         assert_eq!(input.value(), "");
     }
 
@@ -483,5 +499,42 @@ mod tests {
         // Now scrolling down past the bottom-most line signals exit!
         let past = app.move_cursor_down(2);
         assert!(past);
+    }
+
+    #[tokio::test]
+    async fn test_command_history() {
+        let mut app = App::new();
+        let abort1 = tokio::spawn(async {}).abort_handle();
+        let abort2 = tokio::spawn(async {}).abort_handle();
+        app.add_command("cargo test".into(), abort1);
+        app.add_command("git status".into(), abort2);
+
+        // History deduplicates identical consecutive commands
+        let abort3 = tokio::spawn(async {}).abort_handle();
+        app.add_command("git status".into(), abort3);
+        assert_eq!(app.history.len(), 2);
+
+        // Type a draft
+        app.input.set_value("partial".into());
+
+        // Up arrow recalls previous
+        app.history_prev();
+        assert_eq!(app.input.value(), "git status");
+
+        // Up arrow recalls older
+        app.history_prev();
+        assert_eq!(app.input.value(), "cargo test");
+
+        // Up arrow at top stays at oldest
+        app.history_prev();
+        assert_eq!(app.input.value(), "cargo test");
+
+        // Down arrow advances
+        app.history_next();
+        assert_eq!(app.input.value(), "git status");
+
+        // Down arrow at bottom restores draft
+        app.history_next();
+        assert_eq!(app.input.value(), "partial");
     }
 }

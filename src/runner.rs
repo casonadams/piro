@@ -39,11 +39,7 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> A
             if let Some(out) = stdout {
                 let mut reader = BufReader::new(out).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let clean = strip_ansi_escapes::strip(line.as_bytes());
-                    if tx_out
-                        .send(RunnerMsg::Line(String::from_utf8_lossy(&clean).into_owned()))
-                        .is_err()
-                    {
+                    if tx_out.send(RunnerMsg::Line(line)).is_err() {
                         break;
                     }
                 }
@@ -54,11 +50,7 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> A
             if let Some(err) = stderr {
                 let mut reader = BufReader::new(err).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let clean = strip_ansi_escapes::strip(line.as_bytes());
-                    if tx_err
-                        .send(RunnerMsg::Line(String::from_utf8_lossy(&clean).into_owned()))
-                        .is_err()
-                    {
+                    if tx_err.send(RunnerMsg::Line(line)).is_err() {
                         break;
                     }
                 }

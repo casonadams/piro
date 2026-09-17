@@ -67,6 +67,14 @@ The application provides two operational modes:
 1. **Input Mode (`Mode::Input`)**:
    - Default mode. Active hardware cursor sits in the input prompt.
    - Keystrokes type commands; `Enter` runs them.
+   - **Command History**: `Up` / `Down` arrows cycle through previously executed commands, preserving any in-progress draft.
+   - **Readline Editing (`tui-input`)**:
+     - `Ctrl+W` / `Alt+Backspace`: delete previous word
+     - `Ctrl+U`: kill text to start of line
+     - `Ctrl+K`: kill text to end of line
+     - `Ctrl+A` / `Home`: jump to start of line
+     - `Ctrl+E` / `End`: jump to end of line
+     - `Alt+B` / `Alt+F` / `Ctrl+Left` / `Ctrl+Right`: jump word backward/forward
    - `PageUp`, `Ctrl+S`, or `Esc` (when input is empty) enters **Scroll Mode**.
    - Footer displays ` READY ` (or ` RUNNING `).
 2. **Scroll Mode (`Mode::Scroll`)**:
@@ -110,6 +118,7 @@ The application provides two operational modes:
 4. **Command Output Blocks**:
    - `$ <command>` is placed on the first row inside the block in bold white.
    - A blank spacer row follows the command line.
+   - Output lines preserve terminal ANSI color codes parsed via `ansi-to-tui` into colored Ratatui Spans without border misalignment.
    - If a command produces no stdout/stderr, `(no output)` is rendered in dimmed text (`Color::DarkGray` + `Modifier::DIM`).
    - If a command exits with a non-zero code, `Command exited with code <N>` is displayed in bold red followed by a blank spacer row.
    - If a command is cancelled via `Ctrl+C`, `Command cancelled` is displayed in bold yellow followed by a blank spacer row.

@@ -84,6 +84,12 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 }
             }
         }
+        KeyCode::Up => {
+            app.history_prev();
+        }
+        KeyCode::Down => {
+            app.history_next();
+        }
         KeyCode::PageUp => {
             app.enter_scroll_mode();
             app.move_cursor_up(10);
@@ -102,14 +108,9 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 }
             }
         }
-        KeyCode::Char(c) => app.input.insert(c),
-        KeyCode::Backspace => app.input.delete_back(),
-        KeyCode::Delete => app.input.delete_forward(),
-        KeyCode::Left => app.input.move_left(),
-        KeyCode::Right => app.input.move_right(),
-        KeyCode::Home => app.input.move_start(),
-        KeyCode::End => app.input.move_end(),
-        _ => {}
+        _ => {
+            app.input.handle_event(&CrosstermEvent::Key(key));
+        }
     }
 }
 

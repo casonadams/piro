@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use ansi_to_tui::IntoText;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -63,7 +64,7 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
         border,
     ));
 
-    // Output body
+    // Output body with ANSI color parsing
     if block.lines.is_empty() {
         lines.push(box_line(
             vec![Span::styled(fit_to_width("(no output)", inner_w), dim)],
@@ -71,13 +72,8 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
         ));
     } else {
         for l in &block.lines {
-            lines.push(box_line(
-                vec![Span::styled(
-                    fit_to_width(l, inner_w),
-                    Style::default().fg(Color::White),
-                )],
-                border,
-            ));
+            let parsed_spans = parse_ansi_line(l, inner_w);
+            lines.push(box_line(parsed_spans, border));
         }
     }
 
@@ -131,6 +127,60 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     lines
 }
 
+fn parse_ansi_line(raw: &str, target_width: usize) -> Vec<Span<'static>> {
+    let spans: Vec<Span<'static>> = match raw.as_bytes().into_text() {
+        Ok(text) => text
+            .lines
+            .into_iter()
+            .flat_map(|l| l.spans)
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect(),
+        Err(_) => vec![Span::raw(raw.to_string())],
+    };
+
+    fit_spans_to_width(spans, target_width)
+}
+
+fn fit_spans_to_width(spans: Vec<Span<'static>>, target_width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut current_width = 0;
+
+    for span in spans {
+        let span_w = span_visual_width(&span.content);
+        if current_width + span_w <= target_width {
+            current_width += span_w;
+            out.push(span);
+        } else {
+            // Needs truncation
+            let budget = target_width.saturating_sub(current_width);
+            let mut truncated = String::new();
+            let mut w = 0;
+            for c in span.content.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                if w + cw > budget {
+                    break;
+                }
+                w += cw;
+                truncated.push(c);
+            }
+            current_width += w;
+            out.push(Span::styled(truncated, span.style));
+            break;
+        }
+    }
+
+    if current_width < target_width {
+        let pad = target_width - current_width;
+        out.push(Span::raw(" ".repeat(pad)));
+    }
+
+    out
+}
+
+fn span_visual_width(text: &str) -> usize {
+    text.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+}
+
 pub fn fit_to_width(text: &str, target: usize) -> String {
     let mut w = 0;
     let mut out = String::new();
@@ -150,4 +200,21 @@ pub fn fit_to_width(text: &str, target: usize) -> String {
 
 pub fn format_duration(dur: Duration) -> String {
     format!("{:.1}s", dur.as_secs_f64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ansi_parsing_and_width() {
+        let raw = "\x1b[32mhello\x1b[0m \x1b[31mworld\x1b[0m";
+        let spans = parse_ansi_line(raw, 20);
+
+        let total_w: usize = spans.iter().map(|s| span_visual_width(&s.content)).sum();
+        assert_eq!(total_w, 20);
+
+        assert_eq!(spans[0].content, "hello");
+        assert_eq!(spans[0].style.fg, Some(Color::Green));
+    }
 }
