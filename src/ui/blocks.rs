@@ -84,10 +84,10 @@ fn render_text_card(card: TextCard, width: usize) -> Vec<FormattedLine> {
             });
         }
     } else {
-        for (idx, wrapped) in wrap_ansi(card.text, inner_w).into_iter().enumerate() {
+        for wrapped in wrap_ansi(card.text, inner_w) {
             lines.push(FormattedLine {
-                line: box_line(wrapped, style),
-                is_continuation: idx > 0,
+                line: box_line(wrapped.spans, style),
+                is_continuation: wrapped.is_continuation,
             });
         }
     }
@@ -151,14 +151,14 @@ fn render_cmd_header(cmd: &str, title: Option<&str>, layout: &CardLayout) -> Vec
         is_continuation: false,
     }];
     let cmd_raw = format!("$ {}", cmd);
-    for (idx, wrapped) in wrap_ansi(&cmd_raw, layout.inner_w).into_iter().enumerate() {
-        let mut spans = wrapped;
+    for wrapped in wrap_ansi(&cmd_raw, layout.inner_w) {
+        let mut spans = wrapped.spans;
         if let Some(s) = spans.first_mut() {
             s.style = s.style.add_modifier(Modifier::BOLD);
         }
         lines.push(FormattedLine {
             line: box_line(spans, layout.border),
-            is_continuation: idx > 0,
+            is_continuation: wrapped.is_continuation,
         });
     }
     lines.push(FormattedLine {
@@ -213,10 +213,10 @@ fn render_output_body(block: &CommandOutputBlock, layout: &CardLayout) -> Vec<Fo
 
     let mut body = Vec::new();
     for l in &block.lines {
-        for (idx, wrapped) in wrap_ansi(l, layout.inner_w).into_iter().enumerate() {
+        for wrapped in wrap_ansi(l, layout.inner_w) {
             body.push(FormattedLine {
-                line: box_line(wrapped, layout.border),
-                is_continuation: idx > 0,
+                line: box_line(wrapped.spans, layout.border),
+                is_continuation: wrapped.is_continuation,
             });
         }
     }
@@ -343,5 +343,21 @@ mod tests {
         let top_str = &lines[0].line.spans[0].content;
         assert!(top_str.contains("Tool: bash"));
         assert_eq!(str_width(top_str), width);
+    }
+
+    #[test]
+    fn test_render_user_input_multiline_block() {
+        let width = 40;
+        let lines = render_user_input_block("first line\nsecond line", width);
+        // Top border + 2 content lines + bottom border = 4 lines
+        assert_eq!(lines.len(), 4);
+        assert!(!lines[1].is_continuation);
+        assert!(!lines[2].is_continuation);
+
+        let row1: String = lines[1].line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let row2: String = lines[2].line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(row1.contains("first line"));
+        assert!(row2.contains("second line"));
+        assert!(!row1.contains("second line"));
     }
 }
