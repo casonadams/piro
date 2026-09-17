@@ -22,7 +22,7 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let width = (area.width as usize).saturating_sub(1);
+    let width = area.width as usize;
     if width < 10 {
         return;
     }

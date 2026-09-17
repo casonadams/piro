@@ -8,27 +8,36 @@ use unicode_width::UnicodeWidthChar;
 use crate::app::{CommandOutputBlock, CommandStatus};
 
 fn box_border(left: char, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
-    let inner = fill.to_string().repeat(width.saturating_sub(2));
-    Line::from(vec![Span::styled(format!("{}{}{}", left, inner, right), style)])
+    let box_w = width.saturating_sub(2);
+    let inner = fill.to_string().repeat(box_w.saturating_sub(2));
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(format!("{}{}{}", left, inner, right), style),
+        Span::raw(" "),
+    ])
 }
 
 fn box_line(spans: Vec<Span<'static>>, border_style: Style) -> Line<'static> {
-    let mut line_spans = vec![Span::styled("│ ", border_style)];
+    let mut line_spans = vec![Span::raw(" "), Span::styled("│ ", border_style)];
     line_spans.extend(spans);
     line_spans.push(Span::styled(" │", border_style));
+    line_spans.push(Span::raw(" "));
     Line::from(line_spans)
 }
 
 pub fn render_user_input_block(command: &str, width: usize) -> Vec<Line<'static>> {
     let style = Style::default().fg(Color::Cyan);
-    let inner_w = width.saturating_sub(4);
-    let cmd = fit_to_width(command, inner_w);
+    let inner_w = width.saturating_sub(6);
 
-    vec![
-        box_border('┌', '─', '┐', width, style),
-        box_line(vec![Span::styled(cmd, Style::default().fg(Color::White))], style),
-        box_border('└', '─', '┘', width, style),
-    ]
+    let mut lines = Vec::new();
+    lines.push(box_border('┌', '─', '┐', width, style));
+
+    for wrapped in wrap_text_to_spans(command, inner_w, Style::default().fg(Color::White)) {
+        lines.push(box_line(wrapped, style));
+    }
+
+    lines.push(box_border('└', '─', '┘', width, style));
+    lines
 }
 
 pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<Line<'static>> {
@@ -40,26 +49,26 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     };
     let border = Style::default().fg(color);
     let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
-    let inner_w = width.saturating_sub(4);
+    let inner_w = width.saturating_sub(6);
     let empty_line = " ".repeat(inner_w);
 
     let mut lines = Vec::new();
     lines.push(box_border('┌', '─', '┐', width, border));
 
-    // Command line
-    let cmd_text = fit_to_width(&format!("$ {}", block.command), inner_w);
-    lines.push(box_line(
-        vec![Span::styled(
-            cmd_text,
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        )],
-        border,
-    ));
+    // Command line (word-wrapped if long)
+    let cmd_raw = format!("$ {}", block.command);
+    for wrapped in wrap_text_to_spans(
+        &cmd_raw,
+        inner_w,
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    ) {
+        lines.push(box_line(wrapped, border));
+    }
 
     // Spacer
     lines.push(box_line(vec![Span::raw(empty_line.clone())], border));
 
-    // Output body with ANSI color parsing
+    // Output body with word-boundary wrapping and ANSI color parsing
     if block.lines.is_empty() {
         lines.push(box_line(
             vec![Span::styled(fit_to_width("(no output)", inner_w), dim)],
@@ -67,8 +76,9 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
         ));
     } else {
         for l in &block.lines {
-            let parsed_spans = parse_ansi_line(l, inner_w);
-            lines.push(box_line(parsed_spans, border));
+            for wrapped in parse_and_wrap_ansi_line(l, inner_w) {
+                lines.push(box_line(wrapped, border));
+            }
         }
     }
 
@@ -78,10 +88,10 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     // Failure / Cancel message
     match block.status {
         CommandStatus::Failed(code) => {
-            let msg = fit_to_width(&format!("Command exited with code {}", code), inner_w);
+            let msg = format!("Command exited with code {}", code);
             lines.push(box_line(
                 vec![Span::styled(
-                    msg,
+                    fit_to_width(&msg, inner_w),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )],
                 border,
@@ -89,10 +99,10 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
             lines.push(box_line(vec![Span::raw(empty_line)], border));
         }
         CommandStatus::Cancelled => {
-            let msg = fit_to_width("Command cancelled", inner_w);
+            let msg = "Command cancelled";
             lines.push(box_line(
                 vec![Span::styled(
-                    msg,
+                    fit_to_width(msg, inner_w),
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 )],
                 border,
@@ -117,7 +127,7 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     lines
 }
 
-fn parse_ansi_line(raw: &str, target_width: usize) -> Vec<Span<'static>> {
+pub fn parse_and_wrap_ansi_line(raw: &str, target_width: usize) -> Vec<Vec<Span<'static>>> {
     let spans: Vec<Span<'static>> = match raw.as_bytes().into_text() {
         Ok(text) => text
             .lines
@@ -128,45 +138,131 @@ fn parse_ansi_line(raw: &str, target_width: usize) -> Vec<Span<'static>> {
         Err(_) => vec![Span::raw(raw.to_string())],
     };
 
-    fit_spans_to_width(spans, target_width)
+    let tokens = tokenize_spans(spans);
+    wrap_tokens_to_lines(tokens, target_width)
 }
 
-fn fit_spans_to_width(spans: Vec<Span<'static>>, target_width: usize) -> Vec<Span<'static>> {
-    let mut out = Vec::new();
-    let mut current_width = 0;
+fn wrap_text_to_spans(text: &str, target_width: usize, style: Style) -> Vec<Vec<Span<'static>>> {
+    let tokens = tokenize_spans(vec![Span::styled(text.to_string(), style)]);
+    wrap_tokens_to_lines(tokens, target_width)
+}
 
+struct Token {
+    text: String,
+    style: Style,
+    is_space: bool,
+}
+
+fn tokenize_spans(spans: Vec<Span<'static>>) -> Vec<Token> {
+    let mut tokens = Vec::new();
     for span in spans {
-        let span_w: usize = span
-            .content
+        let style = span.style;
+        let mut cur_token = String::new();
+        let mut in_space: Option<bool> = None;
+
+        for c in span.content.chars() {
+            let is_ws = c.is_whitespace();
+            match in_space {
+                Some(ws) if ws == is_ws => {
+                    cur_token.push(c);
+                }
+                Some(ws) => {
+                    tokens.push(Token {
+                        text: std::mem::take(&mut cur_token),
+                        style,
+                        is_space: ws,
+                    });
+                    cur_token.push(c);
+                    in_space = Some(is_ws);
+                }
+                None => {
+                    cur_token.push(c);
+                    in_space = Some(is_ws);
+                }
+            }
+        }
+        if !cur_token.is_empty() {
+            tokens.push(Token {
+                text: cur_token,
+                style,
+                is_space: in_space.unwrap_or(false),
+            });
+        }
+    }
+    tokens
+}
+
+fn wrap_tokens_to_lines(tokens: Vec<Token>, target_width: usize) -> Vec<Vec<Span<'static>>> {
+    if tokens.is_empty() {
+        return vec![vec![Span::raw(" ".repeat(target_width))]];
+    }
+
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut cur_line: Vec<Span<'static>> = Vec::new();
+    let mut cur_w = 0;
+
+    for token in tokens {
+        let token_w: usize = token
+            .text
             .chars()
             .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
             .sum();
-        if current_width + span_w <= target_width {
-            current_width += span_w;
-            out.push(span);
-        } else {
-            let budget = target_width.saturating_sub(current_width);
-            let mut truncated = String::new();
-            let mut w = 0;
-            for c in span.content.chars() {
-                let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-                if w + cw > budget {
-                    break;
-                }
-                w += cw;
-                truncated.push(c);
+
+        if token.is_space {
+            if cur_w == 0 {
+                continue;
             }
-            current_width += w;
-            out.push(Span::styled(truncated, span.style));
-            break;
+            if cur_w + token_w <= target_width {
+                cur_w += token_w;
+                cur_line.push(Span::styled(token.text, token.style));
+            } else {
+                cur_line.push(Span::raw(" ".repeat(target_width - cur_w)));
+                lines.push(std::mem::take(&mut cur_line));
+                cur_w = 0;
+            }
+        } else if cur_w + token_w <= target_width {
+            cur_w += token_w;
+            cur_line.push(Span::styled(token.text, token.style));
+        } else {
+            if cur_w > 0 {
+                cur_line.push(Span::raw(" ".repeat(target_width - cur_w)));
+                lines.push(std::mem::take(&mut cur_line));
+                cur_w = 0;
+            }
+
+            if token_w <= target_width {
+                cur_w = token_w;
+                cur_line.push(Span::styled(token.text, token.style));
+            } else {
+                let mut chunk = String::new();
+                let mut chunk_w = 0;
+                for c in token.text.chars() {
+                    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                    if chunk_w + cw > target_width {
+                        lines.push(vec![Span::styled(std::mem::take(&mut chunk), token.style)]);
+                        chunk_w = 0;
+                    }
+                    chunk_w += cw;
+                    chunk.push(c);
+                }
+                if !chunk.is_empty() {
+                    cur_w = chunk_w;
+                    cur_line.push(Span::styled(chunk, token.style));
+                }
+            }
         }
     }
 
-    if current_width < target_width {
-        out.push(Span::raw(" ".repeat(target_width - current_width)));
+    if cur_w > 0 {
+        cur_line.push(Span::raw(" ".repeat(target_width - cur_w)));
+        lines.push(cur_line);
     }
 
-    out
+    if lines.is_empty() {
+        lines.push(vec![Span::raw(" ".repeat(target_width))]);
+    }
+
+    lines
 }
 
 pub fn fit_to_width(text: &str, target: usize) -> String {
@@ -191,20 +287,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_word_wrapping() {
+        let raw = "The quick brown fox jumps over the lazy dog";
+        let wrapped = parse_and_wrap_ansi_line(raw, 16);
+        assert!(wrapped.len() > 1);
+
+        // Verify each line has width exactly 16
+        for line in &wrapped {
+            let line_w: usize = line
+                .iter()
+                .map(|s| {
+                    s.content
+                        .chars()
+                        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                        .sum::<usize>()
+                })
+                .sum();
+            assert_eq!(line_w, 16);
+        }
+
+        // Verify word "quick" is intact
+        assert_eq!(wrapped[0][0].content, "The");
+        assert_eq!(wrapped[0][2].content, "quick");
+    }
+
+    #[test]
     fn test_ansi_parsing_and_width() {
         let raw = "\x1b[32mhello\x1b[0m \x1b[31mworld\x1b[0m";
-        let spans = parse_ansi_line(raw, 20);
-        let total_w: usize = spans
-            .iter()
-            .map(|s| {
-                s.content
-                    .chars()
-                    .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-                    .sum::<usize>()
-            })
-            .sum();
-        assert_eq!(total_w, 20);
-        assert_eq!(spans[0].content, "hello");
-        assert_eq!(spans[0].style.fg, Some(Color::Green));
+        let wrapped = parse_and_wrap_ansi_line(raw, 20);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0][0].content, "hello");
+        assert_eq!(wrapped[0][0].style.fg, Some(Color::Green));
     }
 }
