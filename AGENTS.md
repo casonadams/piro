@@ -67,14 +67,18 @@ The application provides two operational modes:
 1. **Input Mode (`Mode::Input`)**:
    - Default mode. Active hardware cursor sits in the input prompt.
    - Keystrokes type commands; `Enter` runs them.
-   - **Command History**: `Up` / `Down` arrows cycle through previously executed commands, preserving any in-progress draft.
-   - **Readline Editing (`tui-input`)**:
-     - `Ctrl+W` / `Alt+Backspace`: delete previous word
-     - `Ctrl+U`: kill text to start of line
-     - `Ctrl+K`: kill text to end of line
-     - `Ctrl+A` / `Home`: jump to start of line
-     - `Ctrl+E` / `End`: jump to end of line
-     - `Alt+B` / `Alt+F` / `Ctrl+Left` / `Ctrl+Right`: jump word backward/forward
+   - **Command History (Bash-Style Persistence)**:
+     - Automatically saves executed commands to `~/.tuitest_history` across sessions.
+     - `Up` / `Ctrl+P`: cycles backward through previous commands.
+     - `Down` / `Ctrl+N`: cycles forward, restoring any in-progress draft.
+     - Automatically deduplicates consecutive identical commands.
+   - **Unix Readline Editing**:
+     - `Ctrl+W` / `Alt+Backspace`: bash `unix-word-rubout` (deletes backward across word to whitespace, including flags `--flag` and paths `src/main.rs`).
+     - `Ctrl+U`: kill line to start.
+     - `Ctrl+K`: kill line to end.
+     - `Ctrl+A` / `Home`: jump to start of line.
+     - `Ctrl+E` / `End`: jump to end of line.
+     - `Alt+B` / `Alt+F`: jump word backward / forward.
    - `PageUp`, `Ctrl+S`, or `Esc` (when input is empty) enters **Scroll Mode**.
    - Footer displays ` READY ` (or ` RUNNING `).
 2. **Scroll Mode (`Mode::Scroll`)**:

@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::task::AbortHandle;
 
@@ -36,31 +37,138 @@ impl Ord for DocPos {
 
 #[derive(Debug, Default, Clone)]
 pub struct InputState {
-    inner: tui_input::Input,
+    value: String,
+    cursor: usize,
 }
 
 impl InputState {
     pub fn value(&self) -> &str {
-        self.inner.value()
+        &self.value
     }
 
     pub fn cursor(&self) -> usize {
-        self.inner.visual_cursor()
+        self.cursor
     }
 
-    pub fn handle_event(&mut self, event: &crossterm::event::Event) {
-        use tui_input::backend::crossterm::EventHandler;
-        self.inner.handle_event(event);
+    fn byte_idx(&self) -> usize {
+        self.value
+            .char_indices()
+            .nth(self.cursor)
+            .map_or(self.value.len(), |(i, _)| i)
+    }
+
+    pub fn insert(&mut self, c: char) {
+        let idx = self.byte_idx();
+        self.value.insert(idx, c);
+        self.cursor += 1;
+    }
+
+    pub fn delete_back(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let idx = self.byte_idx();
+            self.value.remove(idx);
+        }
+    }
+
+    pub fn delete_forward(&mut self) {
+        if self.cursor < self.value.chars().count() {
+            let idx = self.byte_idx();
+            self.value.remove(idx);
+        }
+    }
+
+    pub fn delete_prev_word(&mut self) {
+        let val = &self.value;
+        if self.cursor == 0 || val.is_empty() {
+            return;
+        }
+
+        let chars: Vec<char> = val.chars().collect();
+        let cur = self.cursor.min(chars.len());
+        let mut idx = cur;
+
+        // Skip any whitespace immediately before cursor
+        while idx > 0 && chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        // Delete backward across non-whitespace characters (bash unix-word-rubout)
+        while idx > 0 && !chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+
+        let mut new_val: String = chars[..idx].iter().collect();
+        if cur < chars.len() {
+            new_val.extend(chars[cur..].iter());
+        }
+        self.value = new_val;
+        self.cursor = idx;
+    }
+
+    pub fn delete_line(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let cur = self.cursor.min(chars.len());
+        self.value = chars[cur..].iter().collect();
+        self.cursor = 0;
+    }
+
+    pub fn delete_to_end(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let cur = self.cursor.min(chars.len());
+        self.value = chars[..cur].iter().collect();
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor < self.value.chars().count() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn move_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
+
+    pub fn move_prev_word(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let mut idx = self.cursor.min(chars.len());
+        while idx > 0 && chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        while idx > 0 && !chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        self.cursor = idx;
+    }
+
+    pub fn move_next_word(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let len = chars.len();
+        let mut idx = self.cursor.min(len);
+        while idx < len && !chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        while idx < len && chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        self.cursor = idx;
     }
 
     pub fn set_value(&mut self, val: String) {
-        self.inner = tui_input::Input::new(val);
+        self.cursor = val.chars().count();
+        self.value = val;
     }
 
     pub fn take_value(&mut self) -> String {
-        let val = self.inner.value().to_string();
-        self.inner.reset();
-        val
+        self.cursor = 0;
+        std::mem::take(&mut self.value)
     }
 }
 
@@ -143,7 +251,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        Self {
+        let mut app = Self {
             running: true,
             mode: Mode::Input,
             input: InputState::default(),
@@ -159,6 +267,42 @@ impl App {
             history_idx: None,
             draft_input: String::new(),
             active_abort: None,
+        };
+        app.load_history();
+        app
+    }
+
+    fn history_file_path() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|h| PathBuf::from(h).join(".tuitest_history"))
+    }
+
+    pub fn load_history(&mut self) {
+        let Some(path) = Self::history_file_path() else {
+            return;
+        };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() && self.history.last().map(|s| s.as_str()) != Some(trimmed) {
+                if self.history.len() >= 1000 {
+                    self.history.remove(0);
+                }
+                self.history.push(trimmed.to_string());
+            }
+        }
+    }
+
+    fn save_history_entry(cmd: &str) {
+        let Some(path) = Self::history_file_path() else {
+            return;
+        };
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{}", cmd);
         }
     }
 
@@ -168,10 +312,11 @@ impl App {
 
     pub fn add_command(&mut self, command: String, handle: AbortHandle) {
         if self.history.last().map(|s| s.as_str()) != Some(&command) {
-            if self.history.len() >= 500 {
+            if self.history.len() >= 1000 {
                 self.history.remove(0);
             }
             self.history.push(command.clone());
+            Self::save_history_entry(&command);
         }
         self.history_idx = None;
         self.draft_input.clear();
@@ -291,7 +436,7 @@ impl App {
             }
             false
         } else if self.scroll.scroll_from_bottom > 0 {
-            self.scroll.scroll_down(delta);
+            self.scroll_down(delta);
             false
         } else {
             true
@@ -376,7 +521,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn test_input_state_editing() {
+        let mut input = InputState::default();
+        input.insert('a');
+        input.insert('b');
+        input.insert('c');
+        assert_eq!(input.value(), "abc");
+        assert_eq!(input.cursor(), 3);
+
+        input.move_left();
+        input.delete_back();
+        assert_eq!(input.value(), "ac");
+
+        input.move_start();
+        input.insert('z');
+        assert_eq!(input.value(), "zac");
+
+        // Test delete_prev_word (unix-word-rubout)
+        input.set_value("cargo test --release".into());
+        input.delete_prev_word();
+        assert_eq!(input.value(), "cargo test ");
+
+        input.delete_prev_word();
+        assert_eq!(input.value(), "cargo ");
+
+        // Test delete_line (Ctrl+U)
+        input.set_value("hello world".into());
+        input.delete_line();
+        assert_eq!(input.value(), "");
+    }
 
     #[tokio::test]
     async fn test_input_and_history() {
@@ -388,10 +563,6 @@ mod tests {
         assert_eq!(app.input.value(), "echo 1");
         app.history_next();
         assert_eq!(app.input.value(), "draft");
-
-        let key_w = Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        app.input.handle_event(&key_w);
-        assert_eq!(app.input.take_value(), "");
     }
 
     #[test]

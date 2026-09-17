@@ -71,6 +71,52 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 app.enter_scroll_mode();
                 return;
             }
+            KeyCode::Char('w') => {
+                app.input.delete_prev_word();
+                return;
+            }
+            KeyCode::Char('p') => {
+                app.history_prev();
+                return;
+            }
+            KeyCode::Char('n') => {
+                app.history_next();
+                return;
+            }
+            KeyCode::Char('a') => {
+                app.input.move_start();
+                return;
+            }
+            KeyCode::Char('e') => {
+                app.input.move_end();
+                return;
+            }
+            KeyCode::Char('u') => {
+                app.input.delete_line();
+                return;
+            }
+            KeyCode::Char('k') => {
+                app.input.delete_to_end();
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        match key.code {
+            KeyCode::Char('b') => {
+                app.input.move_prev_word();
+                return;
+            }
+            KeyCode::Char('f') => {
+                app.input.move_next_word();
+                return;
+            }
+            KeyCode::Backspace => {
+                app.input.delete_prev_word();
+                return;
+            }
             _ => {}
         }
     }
@@ -103,7 +149,14 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 }
             }
         }
-        _ => app.input.handle_event(&CrosstermEvent::Key(key)),
+        KeyCode::Char(c) => app.input.insert(c),
+        KeyCode::Backspace => app.input.delete_back(),
+        KeyCode::Delete => app.input.delete_forward(),
+        KeyCode::Left => app.input.move_left(),
+        KeyCode::Right => app.input.move_right(),
+        KeyCode::Home => app.input.move_start(),
+        KeyCode::End => app.input.move_end(),
+        _ => {}
     }
 }
 

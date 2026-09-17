@@ -10,7 +10,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io
 unicode-width = "0.2"
 futures-util = { version = "0.3", default-features = false }
 ansi-to-tui = "8.0.1"
-tui-input = { version = "0.15.4", default-features = false, features = ["crossterm"] }
 
 [profile.release]
 opt-level = 3
