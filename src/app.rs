@@ -158,6 +158,16 @@ pub struct CommandOutputBlock {
 pub enum FeedItem {
     UserInput(String),
     CommandOutput(CommandOutputBlock),
+    #[allow(dead_code)]
+    AgentThought(String),
+    #[allow(dead_code)]
+    ToolCall {
+        name: String,
+        input: String,
+        block: CommandOutputBlock,
+    },
+    #[allow(dead_code)]
+    AgentResponse(String),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -298,11 +308,14 @@ impl App {
         if !self.is_command_running() {
             return;
         }
-        if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
-            if b.lines.len() >= 5000 {
-                b.lines.remove(0);
+        match self.feed.last_mut() {
+            Some(FeedItem::CommandOutput(b)) | Some(FeedItem::ToolCall { block: b, .. }) => {
+                if b.lines.len() >= 5000 {
+                    b.lines.remove(0);
+                }
+                b.lines.push(line);
             }
-            b.lines.push(line);
+            _ => {}
         }
     }
 
@@ -311,22 +324,28 @@ impl App {
             return;
         }
         self.active_process = None;
-        if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
-            b.duration = Some(dur);
-            b.status = match code {
-                Some(0) => CommandStatus::Success(0),
-                Some(c) => CommandStatus::Failed(c),
-                None => CommandStatus::Failed(-1),
-            };
+        match self.feed.last_mut() {
+            Some(FeedItem::CommandOutput(b)) | Some(FeedItem::ToolCall { block: b, .. }) => {
+                b.duration = Some(dur);
+                b.status = match code {
+                    Some(0) => CommandStatus::Success(0),
+                    Some(c) => CommandStatus::Failed(c),
+                    None => CommandStatus::Failed(-1),
+                };
+            }
+            _ => {}
         }
     }
 
     pub fn cancel_active(&mut self) -> bool {
         if let Some(mut h) = self.active_process.take() {
             h.kill();
-            if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
-                b.duration = Some(b.started_at.elapsed());
-                b.status = CommandStatus::Cancelled;
+            match self.feed.last_mut() {
+                Some(FeedItem::CommandOutput(b)) | Some(FeedItem::ToolCall { block: b, .. }) => {
+                    b.duration = Some(b.started_at.elapsed());
+                    b.status = CommandStatus::Cancelled;
+                }
+                _ => {}
             }
             true
         } else {
@@ -426,15 +445,21 @@ impl App {
     pub fn copy_current_block(&self) -> Option<String> {
         self.feed.iter().rev().find_map(|item| match item {
             FeedItem::CommandOutput(c) if !c.lines.is_empty() => Some(c.lines.join("\n")),
+            FeedItem::ToolCall { block, .. } if !block.lines.is_empty() => Some(block.lines.join("\n")),
+            FeedItem::AgentThought(t) if !t.is_empty() => Some(t.clone()),
+            FeedItem::AgentResponse(r) if !r.is_empty() => Some(r.clone()),
             _ => None,
         })
     }
 
     pub fn toggle_expand(&mut self) {
         for item in self.feed.iter_mut().rev() {
-            if let FeedItem::CommandOutput(b) = item {
-                b.expanded = !b.expanded;
-                break;
+            match item {
+                FeedItem::CommandOutput(b) | FeedItem::ToolCall { block: b, .. } => {
+                    b.expanded = !b.expanded;
+                    break;
+                }
+                _ => {}
             }
         }
     }

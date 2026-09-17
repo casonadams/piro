@@ -2,6 +2,7 @@ pub mod blocks;
 pub mod feed;
 pub mod footer;
 pub mod input;
+pub mod text;
 
 use ratatui::{
     Frame,

@@ -1,11 +1,10 @@
-use ansi_to_tui::IntoText;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthChar;
 
 use crate::app::{CommandOutputBlock, CommandStatus};
+use crate::ui::text::{pad_spaces, str_width, wrap_ansi};
 
 pub const TAIL_LINES: usize = 8;
 
@@ -17,6 +16,16 @@ pub struct FormattedLine {
 fn box_border(left: char, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
     let inner = fill.to_string().repeat(width.saturating_sub(2));
     Line::from(vec![Span::styled(format!("{}{}{}", left, inner, right), style)])
+}
+
+fn box_titled_border(left: char, title: &str, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
+    let t_len = str_width(title);
+    if width < t_len + 3 {
+        return box_border(left, fill, right, width, style);
+    }
+    let rem = width.saturating_sub(3 + t_len);
+    let border_str = format!("{}{}{}{}{}", left, fill, title, fill.to_string().repeat(rem), right);
+    Line::from(vec![Span::styled(border_str, style)])
 }
 
 fn box_line(spans: Vec<Span<'static>>, border_style: Style) -> Line<'static> {
@@ -46,7 +55,12 @@ pub fn render_user_input_block(command: &str, width: usize) -> Vec<FormattedLine
     lines
 }
 
-pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
+pub fn render_command_block_with_title(
+    title: Option<&str>,
+    cmd: &str,
+    block: &CommandOutputBlock,
+    width: usize,
+) -> Vec<FormattedLine> {
     let color = match block.status {
         CommandStatus::Running => Color::Yellow,
         CommandStatus::Success(_) => Color::Green,
@@ -61,13 +75,18 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
         is_continuation: false,
     };
 
+    let top_border = match title {
+        Some(t) => box_titled_border('┌', t, '─', '┐', width, border),
+        None => box_border('┌', '─', '┐', width, border),
+    };
+
     let mut lines = vec![FormattedLine {
-        line: box_border('┌', '─', '┐', width, border),
+        line: top_border,
         is_continuation: false,
     }];
 
     // Command line
-    let cmd_raw = format!("$ {}", block.command);
+    let cmd_raw = format!("$ {}", cmd);
     for (idx, wrapped) in wrap_ansi(&cmd_raw, inner_w).into_iter().enumerate() {
         let mut spans = wrapped;
         if let Some(s) = spans.first_mut() {
@@ -169,103 +188,97 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     lines
 }
 
-pub fn pad_spaces(s: &str, target_w: usize) -> String {
-    let w = str_width(s);
-    if w < target_w {
-        format!("{}{}", s, " ".repeat(target_w - w))
+pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
+    render_command_block_with_title(None, &block.command, block, width)
+}
+
+pub fn render_tool_call_block(tool: &str, input: &str, block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
+    render_command_block_with_title(Some(&format!(" Tool: {} ", tool)), input, block, width)
+}
+
+pub fn render_agent_thought_block(thought: &str, width: usize) -> Vec<FormattedLine> {
+    let style = Style::default().fg(Color::Magenta);
+    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+    let inner_w = width.saturating_sub(4);
+    let mut lines = vec![FormattedLine {
+        line: box_titled_border('┌', " Thought ", '─', '┐', width, style),
+        is_continuation: false,
+    }];
+    if thought.trim().is_empty() {
+        lines.push(FormattedLine {
+            line: box_line(vec![Span::styled(pad_spaces("Thinking...", inner_w), dim)], style),
+            is_continuation: false,
+        });
     } else {
-        s.to_string()
-    }
-}
-
-pub fn wrap_ansi(raw: &str, target_w: usize) -> Vec<Vec<Span<'static>>> {
-    let spans: Vec<Span<'static>> = match raw.as_bytes().into_text() {
-        Ok(t) => t
-            .lines
-            .into_iter()
-            .flat_map(|l| l.spans)
-            .map(|s| Span::styled(s.content.into_owned(), s.style))
-            .collect(),
-        Err(_) => vec![Span::raw(raw.to_string())],
-    };
-
-    let total: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-    if total <= target_w {
-        let mut line = spans;
-        if total < target_w {
-            line.push(Span::raw(" ".repeat(target_w - total)));
-        }
-        return vec![line];
-    }
-
-    let mut out = Vec::new();
-    let mut cur = Vec::new();
-    let mut cur_w = 0;
-
-    for span in spans {
-        let style = span.style;
-        for word in span.content.split_inclusive(char::is_whitespace) {
-            let ww = str_width(word);
-            if cur_w + ww <= target_w {
-                cur.push(Span::styled(word.to_string(), style));
-                cur_w += ww;
-            } else {
-                if cur_w > 0 {
-                    cur.push(Span::raw(" ".repeat(target_w - cur_w)));
-                    out.push(std::mem::take(&mut cur));
-                    cur_w = 0;
-                }
-                let trimmed = word.trim_start();
-                let tw = str_width(trimmed);
-                if tw <= target_w {
-                    cur.push(Span::styled(trimmed.to_string(), style));
-                    cur_w = tw;
-                } else {
-                    for c in trimmed.chars() {
-                        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-                        if cur_w + cw > target_w {
-                            out.push(std::mem::take(&mut cur));
-                            cur_w = 0;
-                        }
-                        cur.push(Span::styled(c.to_string(), style));
-                        cur_w += cw;
-                    }
-                }
-            }
+        for (idx, wrapped) in wrap_ansi(thought, inner_w).into_iter().enumerate() {
+            lines.push(FormattedLine {
+                line: box_line(wrapped, style),
+                is_continuation: idx > 0,
+            });
         }
     }
-    if cur_w > 0 {
-        cur.push(Span::raw(" ".repeat(target_w - cur_w)));
-        out.push(cur);
-    }
-    out
+    lines.push(FormattedLine {
+        line: box_border('└', '─', '┘', width, style),
+        is_continuation: false,
+    });
+    lines
 }
 
-fn str_width(s: &str) -> usize {
-    s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+pub fn render_agent_response_block(response: &str, width: usize) -> Vec<FormattedLine> {
+    let style = Style::default().fg(Color::Cyan);
+    let inner_w = width.saturating_sub(4);
+    let mut lines = vec![FormattedLine {
+        line: box_titled_border('┌', " Agent ", '─', '┐', width, style),
+        is_continuation: false,
+    }];
+    for (idx, wrapped) in wrap_ansi(response, inner_w).into_iter().enumerate() {
+        lines.push(FormattedLine {
+            line: box_line(wrapped, style),
+            is_continuation: idx > 0,
+        });
+    }
+    lines.push(FormattedLine {
+        line: box_border('└', '─', '┘', width, style),
+        is_continuation: false,
+    });
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
-    fn test_word_wrapping() {
-        let raw = "The quick brown fox jumps over the lazy dog";
-        let wrapped = wrap_ansi(raw, 16);
-        assert!(wrapped.len() > 1);
-        for line in &wrapped {
-            let line_w: usize = line.iter().map(|s| str_width(&s.content)).sum();
-            assert_eq!(line_w, 16);
-        }
+    fn test_render_thought_and_response_blocks() {
+        let width = 40;
+        let thought_lines = render_agent_thought_block("Considering the next action...", width);
+        assert!(thought_lines.len() >= 3);
+        let top_str = &thought_lines[0].line.spans[0].content;
+        assert!(top_str.contains("Thought"));
+        assert_eq!(str_width(top_str), width);
+
+        let response_lines = render_agent_response_block("Here is the final answer.", width);
+        assert!(response_lines.len() >= 3);
+        let top_resp = &response_lines[0].line.spans[0].content;
+        assert!(top_resp.contains("Agent"));
+        assert_eq!(str_width(top_resp), width);
     }
 
     #[test]
-    fn test_ansi_parsing_and_width() {
-        let raw = "\x1b[32mhello\x1b[0m \x1b[31mworld\x1b[0m";
-        let wrapped = wrap_ansi(raw, 20);
-        assert_eq!(wrapped.len(), 1);
-        assert_eq!(wrapped[0][0].content, "hello");
-        assert_eq!(wrapped[0][0].style.fg, Some(Color::Green));
+    fn test_render_tool_call_block() {
+        let width = 50;
+        let block = CommandOutputBlock {
+            command: "echo test".into(),
+            status: CommandStatus::Success(0),
+            lines: vec!["output 1".into(), "output 2".into()],
+            started_at: Instant::now(),
+            duration: Some(std::time::Duration::from_millis(150)),
+            expanded: false,
+        };
+        let lines = render_tool_call_block("bash", "echo test", &block, width);
+        let top_str = &lines[0].line.spans[0].content;
+        assert!(top_str.contains("Tool: bash"));
+        assert_eq!(str_width(top_str), width);
     }
 }

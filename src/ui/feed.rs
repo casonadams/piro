@@ -7,8 +7,21 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use super::blocks::{FormattedLine, render_command_output_block, render_user_input_block};
+use super::blocks::{
+    FormattedLine, render_agent_response_block, render_agent_thought_block, render_command_output_block,
+    render_tool_call_block, render_user_input_block,
+};
 use crate::app::{App, FeedItem, Mode, SelectionType};
+
+pub fn format_feed_item(item: &FeedItem, width: usize) -> Vec<FormattedLine> {
+    match item {
+        FeedItem::UserInput(cmd) => render_user_input_block(cmd, width),
+        FeedItem::CommandOutput(b) => render_command_output_block(b, width),
+        FeedItem::AgentThought(t) => render_agent_thought_block(t, width),
+        FeedItem::ToolCall { name, input, block } => render_tool_call_block(name, input, block, width),
+        FeedItem::AgentResponse(r) => render_agent_response_block(r, width),
+    }
+}
 
 pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let view_h = area.height as usize;
@@ -29,10 +42,7 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let mut formatted = Vec::new();
     for item in &app.feed {
-        match item {
-            FeedItem::UserInput(cmd) => formatted.extend(render_user_input_block(cmd, width)),
-            FeedItem::CommandOutput(b) => formatted.extend(render_command_output_block(b, width)),
-        }
+        formatted.extend(format_feed_item(item, width));
         formatted.push(FormattedLine {
             line: Line::from(""),
             is_continuation: false,
@@ -116,10 +126,7 @@ fn apply_doc_selection(buf: &mut Buffer, app: &App, start_line: usize, pad: usiz
 pub fn extract_selected_text(app: &App, width: usize) -> String {
     let mut all_formatted = Vec::new();
     for item in &app.feed {
-        match item {
-            FeedItem::UserInput(cmd) => all_formatted.extend(render_user_input_block(cmd, width)),
-            FeedItem::CommandOutput(b) => all_formatted.extend(render_command_output_block(b, width)),
-        }
+        all_formatted.extend(format_feed_item(item, width));
         all_formatted.push(FormattedLine {
             line: Line::from(""),
             is_continuation: false,
@@ -175,6 +182,10 @@ pub fn extract_selected_text(app: &App, width: usize) -> String {
 }
 
 fn clean_scraped_line(raw: &str) -> String {
+    let s = raw.trim();
+    if (s.starts_with('┌') && s.ends_with('┐')) || (s.starts_with('└') && s.ends_with('┘')) {
+        return String::new();
+    }
     let s = raw.trim_end();
     let s = s.strip_prefix("│ ").unwrap_or(s);
     let s = s.strip_suffix(" │").unwrap_or(s);
@@ -227,5 +238,47 @@ mod tests {
             extracted.contains(long_line),
             "extracted text must contain unbroken long line: {extracted:?}"
         );
+    }
+
+    #[test]
+    fn test_extract_thought_and_response_text() {
+        let mut app = App::new();
+        app.feed.push(FeedItem::AgentThought("Reasoning about solution".into()));
+        app.feed.push(FeedItem::ToolCall {
+            name: "bash".into(),
+            input: "echo test".into(),
+            block: CommandOutputBlock {
+                command: "echo test".into(),
+                status: CommandStatus::Success(0),
+                lines: vec!["tool result line".into()],
+                started_at: Instant::now(),
+                duration: Some(std::time::Duration::from_millis(10)),
+                expanded: false,
+            },
+        });
+        app.feed.push(FeedItem::AgentResponse("Final answer here".into()));
+
+        let width = 40;
+        let mut formatted = Vec::new();
+        for item in &app.feed {
+            formatted.extend(format_feed_item(item, width));
+            formatted.push(FormattedLine {
+                line: Line::from(""),
+                is_continuation: false,
+            });
+        }
+
+        app.total_feed_lines = formatted.len();
+        app.enter_scroll_mode();
+        app.selection_type = SelectionType::Line;
+        app.selection_anchor = Some(DocPos { line: 0, col: 0 });
+        app.cursor.line = formatted.len();
+
+        let extracted = extract_selected_text(&app, width);
+        assert!(extracted.contains("Reasoning about solution"));
+        assert!(extracted.contains("tool result line"));
+        assert!(extracted.contains("Final answer here"));
+        assert!(!extracted.contains("┌─"));
+        assert!(!extracted.contains("└─"));
     }
 }

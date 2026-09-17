@@ -1,0 +1,105 @@
+use ansi_to_tui::IntoText;
+use ratatui::text::Span;
+use unicode_width::UnicodeWidthChar;
+
+pub fn str_width(s: &str) -> usize {
+    s.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum()
+}
+
+pub fn pad_spaces(s: &str, target_w: usize) -> String {
+    let w = str_width(s);
+    if w < target_w {
+        format!("{}{}", s, " ".repeat(target_w - w))
+    } else {
+        s.to_string()
+    }
+}
+
+pub fn wrap_ansi(raw: &str, target_w: usize) -> Vec<Vec<Span<'static>>> {
+    let spans: Vec<Span<'static>> = match raw.as_bytes().into_text() {
+        Ok(t) => t
+            .lines
+            .into_iter()
+            .flat_map(|l| l.spans)
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect(),
+        Err(_) => vec![Span::raw(raw.to_string())],
+    };
+
+    let total: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+    if total <= target_w {
+        let mut line = spans;
+        if total < target_w {
+            line.push(Span::raw(" ".repeat(target_w - total)));
+        }
+        return vec![line];
+    }
+
+    let mut out = Vec::new();
+    let mut cur = Vec::new();
+    let mut cur_w = 0;
+
+    for span in spans {
+        let style = span.style;
+        for word in span.content.split_inclusive(char::is_whitespace) {
+            let ww = str_width(word);
+            if cur_w + ww <= target_w {
+                cur.push(Span::styled(word.to_string(), style));
+                cur_w += ww;
+            } else {
+                if cur_w > 0 {
+                    cur.push(Span::raw(" ".repeat(target_w - cur_w)));
+                    out.push(std::mem::take(&mut cur));
+                    cur_w = 0;
+                }
+                let trimmed = word.trim_start();
+                let tw = str_width(trimmed);
+                if tw <= target_w {
+                    cur.push(Span::styled(trimmed.to_string(), style));
+                    cur_w = tw;
+                } else {
+                    for c in trimmed.chars() {
+                        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                        if cur_w + cw > target_w {
+                            out.push(std::mem::take(&mut cur));
+                            cur_w = 0;
+                        }
+                        cur.push(Span::styled(c.to_string(), style));
+                        cur_w += cw;
+                    }
+                }
+            }
+        }
+    }
+    if cur_w > 0 {
+        cur.push(Span::raw(" ".repeat(target_w - cur_w)));
+        out.push(cur);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_word_wrapping() {
+        let raw = "The quick brown fox jumps over the lazy dog";
+        let wrapped = wrap_ansi(raw, 16);
+        assert!(wrapped.len() > 1);
+        for line in &wrapped {
+            let line_w: usize = line.iter().map(|s| str_width(&s.content)).sum();
+            assert_eq!(line_w, 16);
+        }
+    }
+
+    #[test]
+    fn test_ansi_parsing_and_width() {
+        let raw = "\x1b[32mhello\x1b[0m \x1b[31mworld\x1b[0m";
+        let wrapped = wrap_ansi(raw, 20);
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0][0].content, "hello");
+        assert_eq!(wrapped[0][1].content, " ");
+        assert_eq!(wrapped[0][2].content, "world");
+    }
+}
