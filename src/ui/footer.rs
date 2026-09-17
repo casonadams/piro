@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_footer_badges() {
-        let app = App::new();
+        let app = App::default();
         assert!(!app.is_agent_running());
         assert!(!app.is_command_running());
         assert!(!app.is_busy());

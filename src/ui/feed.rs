@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_extract_wrapped_line_without_soft_breaks() {
-        let mut app = App::new();
+        let mut app = App::default();
         let long_line =
             "This is a very long line that will definitely exceed forty characters and wrap without soft line breaks";
         app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_extract_thought_and_response_text() {
-        let mut app = App::new();
+        let mut app = App::default();
         app.feed.push(FeedItem::AgentThought("Reasoning about solution".into()));
         app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command: "echo test".into(),

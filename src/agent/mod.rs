@@ -31,23 +31,65 @@ impl LlmProvider for AnyProvider {
     }
 }
 
-pub fn default_provider() -> AnyProvider {
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
-        AnyProvider::OpenAi(OpenAiProvider::new(OpenAiConfig {
-            base_url,
-            model,
-            api_key: Some(key),
-        }))
+pub struct ModelSpec<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+}
+
+pub fn parse_model_spec(spec: &str) -> ModelSpec<'_> {
+    if let Some((prov, model)) = spec.split_once('/') {
+        ModelSpec {
+            provider: prov.trim(),
+            model: model.trim(),
+        }
     } else {
-        let model = std::env::var("PIRO_MODEL").unwrap_or_else(|_| "ornith-1.5:35b".into());
-        if let Ok(host) = std::env::var("OLLAMA_HOST") {
-            AnyProvider::Ollama(OllamaProvider::with_base_url(host, model))
-        } else {
-            AnyProvider::Ollama(OllamaProvider::new(model))
+        ModelSpec {
+            provider: "ollama",
+            model: spec.trim(),
         }
     }
+}
+
+pub fn provider_from_spec(spec: &str) -> Result<AnyProvider, String> {
+    let parsed = parse_model_spec(spec);
+    if parsed.model.is_empty() {
+        return Err("Model name cannot be empty".into());
+    }
+    match parsed.provider.to_lowercase().as_str() {
+        "ollama" => {
+            if let Ok(host) = std::env::var("OLLAMA_HOST") {
+                Ok(AnyProvider::Ollama(OllamaProvider::with_base_url(
+                    host,
+                    parsed.model.into(),
+                )))
+            } else {
+                Ok(AnyProvider::Ollama(OllamaProvider::new(parsed.model.into())))
+            }
+        }
+        "openai" => {
+            let key = std::env::var("OPENAI_API_KEY").ok();
+            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".into());
+            Ok(AnyProvider::OpenAi(OpenAiProvider::new(OpenAiConfig {
+                base_url,
+                model: parsed.model.into(),
+                api_key: key,
+            })))
+        }
+        unsupported => Err(format!(
+            "Unsupported provider '{}'. Supported providers: 'ollama', 'openai'",
+            unsupported
+        )),
+    }
+}
+
+pub fn create_backend(spec: &str, registry: &ToolRegistry) -> Result<ProviderBackend<AnyProvider>, String> {
+    let provider = provider_from_spec(spec)?;
+    Ok(ProviderBackend::new(provider, registry.definitions()))
+}
+
+pub fn default_provider() -> AnyProvider {
+    let spec = std::env::var("PIRO_MODEL").unwrap_or_else(|_| "ollama/ornith-1.5:35b".into());
+    provider_from_spec(&spec).unwrap_or_else(|_| AnyProvider::Ollama(OllamaProvider::new("ornith-1.5:35b".into())))
 }
 
 pub struct AgentConfig<B> {

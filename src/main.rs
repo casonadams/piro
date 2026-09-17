@@ -1,5 +1,6 @@
 mod agent;
 mod app;
+mod cli;
 mod clipboard;
 mod events;
 mod runner;
@@ -55,10 +56,26 @@ fn dispatch_terminal_event(app: &mut App, input: TerminalInput, ch: &mut LoopCha
     }
 }
 
+fn init_app() -> Result<App, String> {
+    let args = cli::parse_args(std::env::args())?;
+    if let Some(spec) = &args.model {
+        agent::provider_from_spec(spec)?;
+    }
+    Ok(App::new(app::AppOptions { model_spec: args.model }))
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let mut app = match init_app() {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
+    };
+
     let (mut terminal, _guard) = TerminalGuard::init()?;
-    let (mut app, mut reader) = (App::new(), EventStream::new());
+    let mut reader = EventStream::new();
     let (runner_tx, mut runner_rx) = mpsc::unbounded_channel::<RunnerMsg>();
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let mut ticker = tokio::time::interval(Duration::from_millis(50));
@@ -110,7 +127,8 @@ fn handle_runner_msg(app: &mut App, msg: RunnerMsg, agent_tx: &mpsc::UnboundedSe
                     .unwrap_or_default();
                 let prompt = format!("Executed '{}'. Output:\n{}", cmd, output);
                 let registry = ToolRegistry::with_defaults();
-                let backend = agent::default_backend(&registry);
+                let backend = agent::create_backend(&app.model_spec, &registry)
+                    .unwrap_or_else(|_| agent::default_backend(&registry));
                 let config = AgentConfig {
                     prompt,
                     backend,

@@ -232,6 +232,11 @@ impl ScrollState {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct AppOptions {
+    pub model_spec: Option<String>,
+}
+
 pub struct App {
     pub running: bool,
     pub mode: Mode,
@@ -250,10 +255,16 @@ pub struct App {
     pub active_process: Option<ProcessHandle>,
     pub active_agent: Option<AgentHandle>,
     pub pending_agent_cmd: Option<String>,
+    pub model_spec: String,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(options: AppOptions) -> Self {
+        let model_spec = options
+            .model_spec
+            .or_else(|| std::env::var("PIRO_MODEL").ok())
+            .unwrap_or_else(|| "ollama/ornith-1.5:35b".into());
+
         let mut app = Self {
             running: true,
             mode: Mode::Input,
@@ -272,11 +283,20 @@ impl App {
             active_process: None,
             active_agent: None,
             pending_agent_cmd: None,
+            model_spec,
         };
         app.load_history();
         app
     }
+}
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new(AppOptions::default())
+    }
+}
+
+impl App {
     fn history_file_path() -> Option<PathBuf> {
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
         let p = PathBuf::from(&home).join(".piro").join("history");
@@ -589,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_input_and_history() {
-        let mut app = App::new();
+        let mut app = App::default();
         let h = ProcessHandle::mock(tokio::spawn(async {}).abort_handle());
         app.add_command("echo 1".into(), h);
         app.input.set_value("draft".into());
@@ -605,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_scroll_and_selection() {
-        let mut app = App::new();
+        let mut app = App::default();
         app.total_feed_lines = 50;
         app.viewport_height = 20;
         app.enter_scroll_mode();
