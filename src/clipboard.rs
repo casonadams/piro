@@ -1,5 +1,9 @@
 use std::io::Write;
 
+pub fn copy(text: &str) {
+    copy_to_clipboard(text);
+}
+
 pub fn copy_to_clipboard(text: &str) {
     // 1. Native terminal OSC 52 sequence
     let b64 = base64_encode(text.as_bytes());

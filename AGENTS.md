@@ -93,8 +93,10 @@ The application provides two operational modes:
    - Navigation & Cursor in feed:
      - `k` / `Up`: move cursor up 1 line
      - `j` / `Down`: move cursor down 1 line
-     - `PageUp` / `Ctrl+U`: move cursor up 10 lines
-     - `PageDown` / `Ctrl+D`: move cursor down 10 lines
+     - `PageUp`: jump full page up (`viewport_height` lines)
+     - `PageDown`: jump full page down (`viewport_height` lines)
+     - `Ctrl+U`: jump half page up (`viewport_height / 2` lines)
+     - `Ctrl+D`: jump half page down (`viewport_height / 2` lines)
      - `g` / `Home`: jump to top of feed
      - `G` / `End`: jump to bottom of feed
    - **Exit & Yank Behavior**:

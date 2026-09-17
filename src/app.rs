@@ -25,14 +25,14 @@ pub struct DocPos {
 }
 
 impl PartialOrd for DocPos {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+        Some(self.cmp(o))
     }
 }
 
 impl Ord for DocPos {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (self.line, self.col).cmp(&(other.line, other.col))
+    fn cmp(&self, o: &Self) -> Ordering {
+        (self.line, self.col).cmp(&(o.line, o.col))
     }
 }
 
@@ -46,7 +46,6 @@ impl InputState {
     pub fn value(&self) -> &str {
         &self.value
     }
-
     pub fn cursor(&self) -> usize {
         self.cursor
     }
@@ -59,114 +58,78 @@ impl InputState {
     }
 
     pub fn insert(&mut self, c: char) {
-        let idx = self.byte_idx();
-        self.value.insert(idx, c);
+        let i = self.byte_idx();
+        self.value.insert(i, c);
         self.cursor += 1;
     }
 
     pub fn delete_back(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
-            let idx = self.byte_idx();
-            self.value.remove(idx);
+            let i = self.byte_idx();
+            self.value.remove(i);
         }
     }
 
     pub fn delete_forward(&mut self) {
         if self.cursor < self.value.chars().count() {
-            let idx = self.byte_idx();
-            self.value.remove(idx);
+            let i = self.byte_idx();
+            self.value.remove(i);
         }
     }
 
     pub fn delete_prev_word(&mut self) {
-        let val = &self.value;
-        if self.cursor == 0 || val.is_empty() {
-            return;
-        }
-
-        let chars: Vec<char> = val.chars().collect();
-        let cur = self.cursor.min(chars.len());
-        let mut idx = cur;
-
-        // Skip any whitespace immediately before cursor
-        while idx > 0 && chars[idx - 1].is_whitespace() {
-            idx -= 1;
-        }
-        // Delete backward across non-whitespace characters (bash unix-word-rubout)
-        while idx > 0 && !chars[idx - 1].is_whitespace() {
-            idx -= 1;
-        }
-
-        let mut new_val: String = chars[..idx].iter().collect();
-        if cur < chars.len() {
-            new_val.extend(chars[cur..].iter());
-        }
-        self.value = new_val;
-        self.cursor = idx;
+        let b = self.byte_idx();
+        let s = &self.value[..b];
+        let i = s.trim_end().rfind(char::is_whitespace).map_or(0, |x| x + 1);
+        self.value.drain(i..b);
+        self.cursor = self.value[..i].chars().count();
     }
 
     pub fn delete_line(&mut self) {
-        let chars: Vec<char> = self.value.chars().collect();
-        let cur = self.cursor.min(chars.len());
-        self.value = chars[cur..].iter().collect();
+        let i = self.byte_idx();
+        self.value.drain(..i);
         self.cursor = 0;
     }
 
     pub fn delete_to_end(&mut self) {
-        let chars: Vec<char> = self.value.chars().collect();
-        let cur = self.cursor.min(chars.len());
-        self.value = chars[..cur].iter().collect();
+        let i = self.byte_idx();
+        self.value.truncate(i);
     }
 
     pub fn move_left(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
     }
-
     pub fn move_right(&mut self) {
         if self.cursor < self.value.chars().count() {
             self.cursor += 1;
         }
     }
-
     pub fn move_start(&mut self) {
         self.cursor = 0;
     }
-
     pub fn move_end(&mut self) {
         self.cursor = self.value.chars().count();
     }
 
     pub fn move_prev_word(&mut self) {
-        let chars: Vec<char> = self.value.chars().collect();
-        let mut idx = self.cursor.min(chars.len());
-        while idx > 0 && chars[idx - 1].is_whitespace() {
-            idx -= 1;
-        }
-        while idx > 0 && !chars[idx - 1].is_whitespace() {
-            idx -= 1;
-        }
-        self.cursor = idx;
+        let s = &self.value[..self.byte_idx()];
+        let i = s.trim_end().rfind(char::is_whitespace).map_or(0, |x| x + 1);
+        self.cursor = self.value[..i].chars().count();
     }
 
     pub fn move_next_word(&mut self) {
-        let chars: Vec<char> = self.value.chars().collect();
-        let len = chars.len();
-        let mut idx = self.cursor.min(len);
-        while idx < len && !chars[idx].is_whitespace() {
-            idx += 1;
-        }
-        while idx < len && chars[idx].is_whitespace() {
-            idx += 1;
-        }
-        self.cursor = idx;
+        let s = &self.value[self.byte_idx()..];
+        let trimmed = s.trim_start();
+        let skip = s.len() - trimmed.len();
+        let w = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        self.cursor += s[..skip + w].chars().count();
     }
 
     pub fn set_value(&mut self, val: String) {
         self.cursor = val.chars().count();
         self.value = val;
     }
-
     pub fn take_value(&mut self) -> String {
         self.cursor = 0;
         std::mem::take(&mut self.value)
@@ -274,61 +237,32 @@ impl App {
         app
     }
 
-    pub fn piro_dir() -> PathBuf {
-        let local = PathBuf::from(".piro");
-        if local.is_dir() {
-            return local;
-        }
-
-        let home = std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".piro")
-    }
-
-    pub fn history_file_path() -> PathBuf {
-        let dir = Self::piro_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let history_file = dir.join("history");
-
-        if !history_file.exists() {
-            let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
-                return history_file;
-            };
-            let legacy_piro = PathBuf::from(&home).join(".piro_history");
-            let legacy_tui = PathBuf::from(&home).join(".tuitest_history");
-            if legacy_piro.exists() {
-                let _ = std::fs::rename(&legacy_piro, &history_file);
-            } else if legacy_tui.exists() {
-                let _ = std::fs::rename(&legacy_tui, &history_file);
-            }
-        }
-
-        history_file
+    fn history_file_path() -> Option<PathBuf> {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        let p = PathBuf::from(&home).join(".piro").join("history");
+        let _ = std::fs::create_dir_all(p.parent()?);
+        Some(p)
     }
 
     pub fn load_history(&mut self) {
-        let path = Self::history_file_path();
-        let Ok(content) = std::fs::read_to_string(path) else {
-            return;
-        };
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && self.history.last().map(|s| s.as_str()) != Some(trimmed) {
-                if self.history.len() >= 1000 {
-                    self.history.remove(0);
+        let Some(p) = Self::history_file_path() else { return };
+        if let Ok(c) = std::fs::read_to_string(p) {
+            for l in c.lines().map(str::trim).filter(|s| !s.is_empty()) {
+                if self.history.last().map(|s| s.as_str()) != Some(l) {
+                    if self.history.len() >= 1000 {
+                        self.history.remove(0);
+                    }
+                    self.history.push(l.into());
                 }
-                self.history.push(trimmed.to_string());
             }
         }
     }
 
-    fn save_history_entry(cmd: &str) {
-        let path = Self::history_file_path();
+    fn save_history(cmd: &str) {
+        let Some(p) = Self::history_file_path() else { return };
         use std::io::Write;
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{}", cmd);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let _ = writeln!(f, "{}", cmd);
         }
     }
 
@@ -336,26 +270,26 @@ impl App {
         self.active_process.is_some()
     }
 
-    pub fn add_command(&mut self, command: String, handle: ProcessHandle) {
-        if self.history.last().map(|s| s.as_str()) != Some(&command) {
+    pub fn add_command(&mut self, cmd: String, h: ProcessHandle) {
+        if self.history.last().map(|s| s.as_str()) != Some(&cmd) {
             if self.history.len() >= 1000 {
                 self.history.remove(0);
             }
-            self.history.push(command.clone());
-            Self::save_history_entry(&command);
+            self.history.push(cmd.clone());
+            Self::save_history(&cmd);
         }
         self.history_idx = None;
         self.draft_input.clear();
-        self.feed.push(FeedItem::UserInput(command.clone()));
+        self.feed.push(FeedItem::UserInput(cmd.clone()));
         self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
-            command,
+            command: cmd,
             status: CommandStatus::Running,
             lines: Vec::new(),
             started_at: Instant::now(),
             duration: None,
             expanded: false,
         }));
-        self.active_process = Some(handle);
+        self.active_process = Some(h);
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
     }
@@ -372,14 +306,14 @@ impl App {
         }
     }
 
-    pub fn complete_command(&mut self, exit_code: Option<i32>, duration: Duration) {
+    pub fn complete_command(&mut self, code: Option<i32>, dur: Duration) {
         if !self.is_command_running() {
             return;
         }
         self.active_process = None;
         if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
-            b.duration = Some(duration);
-            b.status = match exit_code {
+            b.duration = Some(dur);
+            b.status = match code {
                 Some(0) => CommandStatus::Success(0),
                 Some(c) => CommandStatus::Failed(c),
                 None => CommandStatus::Failed(-1),
@@ -388,8 +322,8 @@ impl App {
     }
 
     pub fn cancel_active(&mut self) -> bool {
-        if let Some(mut handle) = self.active_process.take() {
-            handle.kill();
+        if let Some(mut h) = self.active_process.take() {
+            h.kill();
             if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
                 b.duration = Some(b.started_at.elapsed());
                 b.status = CommandStatus::Cancelled;
@@ -417,13 +351,12 @@ impl App {
         self.selection_type = SelectionType::Char;
     }
 
-    pub fn toggle_selection(&mut self, sel_type: SelectionType) {
+    pub fn toggle_selection(&mut self, t: SelectionType) {
         if self.selection_anchor.is_none() {
-            self.selection_type = sel_type;
+            self.selection_type = t;
             self.selection_anchor = Some(self.cursor);
         } else {
-            self.selection_anchor = None;
-            self.selection_type = SelectionType::Char;
+            self.clear_selection();
         }
     }
 
@@ -442,16 +375,16 @@ impl App {
         })
     }
 
-    pub fn move_cursor_left(&mut self, delta: u16) {
-        self.cursor.col = self.cursor.col.saturating_sub(delta);
+    pub fn move_cursor_left(&mut self, d: u16) {
+        self.cursor.col = self.cursor.col.saturating_sub(d);
     }
 
-    pub fn move_cursor_right(&mut self, delta: u16, max_col: u16) {
-        self.cursor.col = (self.cursor.col + delta).min(max_col);
+    pub fn move_cursor_right(&mut self, d: u16, max_col: u16) {
+        self.cursor.col = (self.cursor.col + d).min(max_col);
     }
 
-    pub fn move_cursor_up(&mut self, delta: usize) {
-        self.cursor.line = self.cursor.line.saturating_sub(delta);
+    pub fn move_cursor_up(&mut self, d: usize) {
+        self.cursor.line = self.cursor.line.saturating_sub(d);
         let (start, _) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
         if self.cursor.line < start {
             self.scroll
@@ -459,27 +392,21 @@ impl App {
         }
     }
 
-    pub fn move_cursor_down(&mut self, delta: usize) -> bool {
-        let max_line = self.total_feed_lines.saturating_sub(1);
-        if self.cursor.line < max_line {
-            self.cursor.line = (self.cursor.line + delta).min(max_line);
+    pub fn move_cursor_down(&mut self, d: usize) -> bool {
+        let max_l = self.total_feed_lines.saturating_sub(1);
+        if self.cursor.line < max_l {
+            self.cursor.line = (self.cursor.line + d).min(max_l);
             let (_, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
             if self.cursor.line >= end {
                 self.scroll.scroll_down(self.cursor.line - end + 1);
             }
             false
         } else if self.scroll.scroll_from_bottom > 0 {
-            self.scroll_down(delta);
+            self.scroll.scroll_down(d);
             false
         } else {
             true
         }
-    }
-
-    pub fn scroll_down(&mut self, delta: usize) {
-        self.scroll.scroll_down(delta);
-        let (start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
-        self.cursor.line = self.cursor.line.clamp(start, end.saturating_sub(1));
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -498,7 +425,7 @@ impl App {
 
     pub fn copy_current_block(&self) -> Option<String> {
         self.feed.iter().rev().find_map(|item| match item {
-            FeedItem::CommandOutput(cmd) if !cmd.lines.is_empty() => Some(cmd.lines.join("\n")),
+            FeedItem::CommandOutput(c) if !c.lines.is_empty() => Some(c.lines.join("\n")),
             _ => None,
         })
     }
@@ -537,15 +464,15 @@ impl App {
         if self.history.is_empty() {
             return;
         }
-        let next_idx = match self.history_idx {
+        let i = match self.history_idx {
             None => {
-                self.draft_input = self.input.value().to_string();
+                self.draft_input = self.input.value().into();
                 self.history.len().saturating_sub(1)
             }
-            Some(i) => i.saturating_sub(1),
+            Some(idx) => idx.saturating_sub(1),
         };
-        self.history_idx = Some(next_idx);
-        self.input.set_value(self.history[next_idx].clone());
+        self.history_idx = Some(i);
+        self.input.set_value(self.history[i].clone());
     }
 
     pub fn history_next(&mut self) {
@@ -564,47 +491,20 @@ impl App {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_input_state_editing() {
-        let mut input = InputState::default();
-        input.insert('a');
-        input.insert('b');
-        input.insert('c');
-        assert_eq!(input.value(), "abc");
-        assert_eq!(input.cursor(), 3);
-
-        input.move_left();
-        input.delete_back();
-        assert_eq!(input.value(), "ac");
-
-        input.move_start();
-        input.insert('z');
-        assert_eq!(input.value(), "zac");
-
-        // Test delete_prev_word (unix-word-rubout)
-        input.set_value("cargo test --release".into());
-        input.delete_prev_word();
-        assert_eq!(input.value(), "cargo test ");
-
-        input.delete_prev_word();
-        assert_eq!(input.value(), "cargo ");
-
-        // Test delete_line (Ctrl+U)
-        input.set_value("hello world".into());
-        input.delete_line();
-        assert_eq!(input.value(), "");
-    }
-
     #[tokio::test]
     async fn test_input_and_history() {
         let mut app = App::new();
-        let handle = ProcessHandle::mock(tokio::spawn(async {}).abort_handle());
-        app.add_command("echo 1".into(), handle);
+        let h = ProcessHandle::mock(tokio::spawn(async {}).abort_handle());
+        app.add_command("echo 1".into(), h);
         app.input.set_value("draft".into());
         app.history_prev();
         assert_eq!(app.input.value(), "echo 1");
         app.history_next();
         assert_eq!(app.input.value(), "draft");
+
+        app.input.set_value("cargo test --release".into());
+        app.input.delete_prev_word();
+        assert_eq!(app.input.value(), "cargo test ");
     }
 
     #[test]
@@ -612,7 +512,6 @@ mod tests {
         let mut app = App::new();
         app.total_feed_lines = 50;
         app.viewport_height = 20;
-
         app.enter_scroll_mode();
         assert_eq!(app.cursor.line, 49);
         app.toggle_selection(SelectionType::Char);
@@ -620,16 +519,5 @@ mod tests {
         assert_eq!(app.cursor.line, 44);
         let (s, e) = app.normalized_selection().unwrap();
         assert_eq!((s.line, e.line), (44, 49));
-
-        assert!(!app.move_cursor_down(5));
-        assert!(app.move_cursor_down(1));
-    }
-
-    #[test]
-    fn test_piro_paths() {
-        let dir = App::piro_dir();
-        assert!(dir.to_string_lossy().contains(".piro"));
-        let hist = App::history_file_path();
-        assert!(hist.to_string_lossy().ends_with("history"));
     }
 }

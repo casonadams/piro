@@ -61,7 +61,7 @@ fn cancel_and_drain(app: &mut App, rx: &mut mpsc::UnboundedReceiver<RunnerMsg>) 
 fn copy_and_flash(app: &mut App, width: usize) {
     let text = ui::feed::extract_selected_text(app, width);
     if !text.is_empty() {
-        clipboard::copy_to_clipboard(&text);
+        clipboard::copy(&text);
         app.copied_flash = true;
     }
     app.clear_selection();
@@ -128,9 +128,13 @@ fn handle_input_key(
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => {
             app.enter_scroll_mode();
-            app.move_cursor_up(10);
+            let page = app.viewport_height.max(1);
+            app.move_cursor_up(page);
         }
-        KeyCode::PageDown => app.scroll_down(10),
+        KeyCode::PageDown => {
+            let page = app.viewport_height.max(1);
+            let _ = app.move_cursor_down(page);
+        }
         KeyCode::Enter => {
             let cmd = app.input.take_value().trim().to_string();
             if !cmd.is_empty() {
@@ -160,6 +164,8 @@ fn handle_scroll_key(
     rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
 ) {
     let max_col = width.saturating_sub(1) as u16;
+    let page = app.viewport_height.max(1);
+    let half_page = (app.viewport_height / 2).max(1);
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
@@ -174,9 +180,9 @@ fn handle_scroll_key(
                 }
             }
             KeyCode::Char('o') => app.toggle_expand(),
-            KeyCode::Char('u') => app.move_cursor_up(10),
+            KeyCode::Char('u') => app.move_cursor_up(half_page),
             KeyCode::Char('d') => {
-                let _ = app.move_cursor_down(10);
+                let _ = app.move_cursor_down(half_page);
             }
             _ => {}
         }
@@ -189,7 +195,7 @@ fn handle_scroll_key(
         KeyCode::Char('o') => app.toggle_expand(),
         KeyCode::Char('b') => {
             if let Some(text) = app.copy_current_block() {
-                clipboard::copy_to_clipboard(&text);
+                clipboard::copy(&text);
                 app.copied_flash = true;
             }
         }
@@ -229,9 +235,9 @@ fn handle_scroll_key(
         }
         KeyCode::Char('0') => app.cursor.col = 2,
         KeyCode::Char('$') => app.cursor.col = max_col.saturating_sub(2),
-        KeyCode::PageUp => app.move_cursor_up(10),
+        KeyCode::PageUp => app.move_cursor_up(page),
         KeyCode::PageDown => {
-            let _ = app.move_cursor_down(10);
+            let _ = app.move_cursor_down(page);
         }
         KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
         KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),

@@ -11,18 +11,15 @@ use crate::app::{App, Mode, SelectionType};
 pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match app.mode {
         Mode::Input => {
-            let (label, color) = if app.is_command_running() {
+            let (lbl, col) = if app.is_command_running() {
                 (" RUNNING ", Color::Yellow)
             } else {
                 (" READY ", Color::Green)
             };
-
-            let status = Span::styled(
-                label,
-                Style::default().bg(color).fg(Color::Black).add_modifier(Modifier::BOLD),
-            );
-
-            let mut spans = vec![status];
+            let mut spans = vec![Span::styled(
+                lbl,
+                Style::default().bg(col).fg(Color::Black).add_modifier(Modifier::BOLD),
+            )];
             if app.copied_flash {
                 spans.push(Span::styled(
                     "  [Copied to clipboard!]",
@@ -38,55 +35,44 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ));
             }
-
             Line::from(spans)
         }
         Mode::Scroll => {
-            if app.selection_anchor.is_some() {
-                let (badge_text, hints_text) = if app.selection_type == SelectionType::Line {
-                    (
-                        " VISUAL LINE ",
-                        " [jk/arrows] Extend lines  [y/Enter] Copy  [v/V/Esc] Cancel",
-                    )
-                } else {
-                    (
-                        " VISUAL ",
-                        " [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel",
-                    )
-                };
-                let badge = Span::styled(
-                    badge_text,
-                    Style::default()
-                        .bg(Color::Yellow)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                );
-                let hints = Span::styled(hints_text, Style::default().fg(Color::White));
-                Line::from(vec![badge, hints])
-            } else {
-                let badge = Span::styled(
+            let (badge, hints) = match app.selection_anchor {
+                Some(_) if app.selection_type == SelectionType::Line => (
+                    " VISUAL LINE ",
+                    " [jk/arrows] Extend lines  [y/Enter] Copy  [v/V/Esc] Cancel",
+                ),
+                Some(_) => (
+                    " VISUAL ",
+                    " [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel",
+                ),
+                None => (
                     " SCROLL ",
-                    Style::default()
-                        .bg(Color::Cyan)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                );
-                let hints = Span::styled(
                     " [hjkl] Move  [v] Char sel  [V] Line sel  [b] Copy block  [i/q/Esc] Return",
-                    Style::default().fg(Color::White),
-                );
-                let mut spans = vec![badge, hints];
-                if app.copied_flash {
-                    spans.push(Span::styled(
-                        "  [Copied to clipboard!]",
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    ));
-                }
-                Line::from(spans)
+                ),
+            };
+            let color = if app.selection_anchor.is_some() {
+                Color::Yellow
+            } else {
+                Color::Cyan
+            };
+            let mut spans = vec![
+                Span::styled(
+                    badge,
+                    Style::default().bg(color).fg(Color::Black).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(hints, Style::default().fg(Color::White)),
+            ];
+            if app.copied_flash {
+                spans.push(Span::styled(
+                    "  [Copied to clipboard!]",
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ));
             }
+            Line::from(spans)
         }
     };
 
-    let p = Paragraph::new(line).style(Style::default().bg(Color::Black).fg(Color::White));
-    frame.render_widget(p, area);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(Color::Black)), area);
 }
