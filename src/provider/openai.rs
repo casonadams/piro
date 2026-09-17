@@ -28,23 +28,37 @@ impl OpenAiProvider {
     }
 
     fn format_messages(&self, history: &[AgentMessage]) -> Vec<Value> {
+        let mut call_counter = 0;
+        let mut last_call_id = String::new();
         history
             .iter()
             .filter_map(|msg| match msg {
                 AgentMessage::User(u) => Some(json!({ "role": "user", "content": u })),
                 AgentMessage::Thought(_) => None,
-                AgentMessage::ToolCall { name, input } => Some(json!({
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": format!("call_{}", name),
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": json!({ "command": input }).to_string()
-                        }
-                    }]
-                })),
-                AgentMessage::Observation { output, .. } => Some(json!({ "role": "tool", "content": output })),
+                AgentMessage::ToolCall { name, input } => {
+                    call_counter += 1;
+                    let id = format!("call_{}_{}", name, call_counter);
+                    last_call_id = id.clone();
+                    Some(json!({
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json!({ "command": input }).to_string()
+                            }
+                        }]
+                    }))
+                }
+                AgentMessage::Observation { output, .. } => {
+                    let id = if last_call_id.is_empty() {
+                        "call_1".to_string()
+                    } else {
+                        last_call_id.clone()
+                    };
+                    Some(json!({ "role": "tool", "tool_call_id": id, "content": output }))
+                }
                 AgentMessage::Response(r) => Some(json!({ "role": "assistant", "content": r })),
             })
             .collect()

@@ -181,18 +181,21 @@ impl App {
     }
 
     fn set_slot(&mut self, is_thought: bool, text: String) {
-        match self.feed.last_mut() {
-            Some(FeedItem::AgentThought(t)) if is_thought => {
-                *t = text;
-                self.scroll_to_bottom();
-                return;
+        for item in self.feed.iter_mut().rev() {
+            match item {
+                FeedItem::AgentThought(t) if is_thought => {
+                    *t = text;
+                    self.scroll_to_bottom();
+                    return;
+                }
+                FeedItem::AgentResponse(r) if !is_thought => {
+                    *r = text;
+                    self.scroll_to_bottom();
+                    return;
+                }
+                FeedItem::UserInput(_) => break,
+                _ => {}
             }
-            Some(FeedItem::AgentResponse(r)) if !is_thought => {
-                *r = text;
-                self.scroll_to_bottom();
-                return;
-            }
-            _ => {}
         }
         let item = if is_thought {
             FeedItem::AgentThought(text)
@@ -465,5 +468,32 @@ mod tests {
         app.clear_feed_and_agent_context();
         assert!(app.agent_history.is_empty());
         assert!(app.feed.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_thought_and_response_does_not_duplicate() {
+        let mut app = App::default();
+        app.feed.push(FeedItem::UserInput("test prompt".into()));
+
+        app.append_agent_thought_delta("Thinking part 1. ".into());
+        app.append_agent_thought_delta("Thinking part 2.".into());
+
+        app.append_agent_response_delta("Answer part 1. ".into());
+        app.append_agent_response_delta("Answer part 2.".into());
+
+        assert_eq!(app.feed.len(), 3);
+
+        app.add_agent_thought("Thinking part 1. Thinking part 2.".into());
+        app.add_agent_response("Answer part 1. Answer part 2.".into());
+
+        assert_eq!(app.feed.len(), 3);
+        match &app.feed[1] {
+            FeedItem::AgentThought(t) => assert_eq!(t, "Thinking part 1. Thinking part 2."),
+            _ => panic!("Expected AgentThought at index 1"),
+        }
+        match &app.feed[2] {
+            FeedItem::AgentResponse(r) => assert_eq!(r, "Answer part 1. Answer part 2."),
+            _ => panic!("Expected AgentResponse at index 2"),
+        }
     }
 }
