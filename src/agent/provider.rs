@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
@@ -69,18 +70,15 @@ impl<P: LlmProvider> AgentBackend for ProviderBackend<P> {
     }
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub struct MockProvider {
     responses: Vec<LlmResponse>,
     idx: AtomicUsize,
 }
 
+#[cfg(test)]
 impl MockProvider {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[cfg(test)]
     pub fn from_responses(responses: Vec<LlmResponse>) -> Self {
         Self {
             responses,
@@ -89,6 +87,7 @@ impl MockProvider {
     }
 }
 
+#[cfg(test)]
 impl LlmProvider for MockProvider {
     async fn chat(&self, history: &[AgentMessage], _tools: &[ToolDefinition]) -> Result<LlmResponse, String> {
         let i = self.idx.fetch_add(1, Ordering::SeqCst);
