@@ -10,8 +10,9 @@ pub use scroll::{DocPos, Mode, ScrollBounds, ScrollState, SelectionType};
 
 use std::path::PathBuf;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
-use crate::agent::{AgentHandle, AgentMessage};
+use crate::agent::{AgentConfig, AgentEvent, AgentHandle, AgentMessage, ToolRegistry, spawn_agent};
 use crate::sys::ProcessHandle;
 
 #[derive(Debug, Default, Clone)]
@@ -149,6 +150,21 @@ impl App {
         self.feed.push(FeedItem::UserInput(prompt));
         self.active_agent = Some(handle);
         self.scroll_to_bottom();
+    }
+
+    pub fn spawn_agent_prompt(&mut self, prompt: String, agent_tx: &mpsc::UnboundedSender<AgentEvent>) {
+        let registry = ToolRegistry::with_defaults();
+        let backend = crate::provider::create_backend(&self.model_spec, &registry)
+            .unwrap_or_else(|_| crate::provider::default_backend(&registry))
+            .with_delta_tx(agent_tx.clone());
+        let config = AgentConfig {
+            prompt: prompt.clone(),
+            backend,
+            registry,
+            history: self.agent_history.clone(),
+        };
+        let handle = spawn_agent(config, agent_tx.clone());
+        self.add_agent_prompt(prompt, handle);
     }
 
     pub fn clear_feed_and_agent_context(&mut self) {

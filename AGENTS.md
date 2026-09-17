@@ -98,10 +98,3 @@ cargo fmt --check
 cargo clippy -- -D warnings
 cargo test
 cargo build --release
-```
-Verify that files are clean and small and modular including reusable
-Too many lines of code in this code base is a smell
-
-```bash
-tokei
-```

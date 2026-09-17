@@ -6,7 +6,7 @@ mod ui;
 
 use std::time::Duration;
 
-use agent::{AgentConfig, AgentEvent, ToolRegistry, spawn_agent};
+use agent::AgentEvent;
 use app::events::{InputCtx, ScrollCtx, handle_input_key, handle_mouse, handle_scroll_key};
 use app::{App, FeedItem, Mode};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
@@ -122,19 +122,7 @@ fn handle_runner_msg(app: &mut App, msg: RunnerMsg, agent_tx: &mpsc::UnboundedSe
                     })
                     .unwrap_or_default();
                 let prompt = format!("Executed '{}'. Output:\n{}", cmd, output);
-                app.agent_history.push(agent::AgentMessage::User(prompt.clone()));
-                let registry = ToolRegistry::with_defaults();
-                let backend = provider::create_backend(&app.model_spec, &registry)
-                    .unwrap_or_else(|_| provider::default_backend(&registry))
-                    .with_delta_tx(agent_tx.clone());
-                let config = AgentConfig {
-                    prompt,
-                    backend,
-                    registry,
-                    history: app.agent_history.clone(),
-                };
-                let handle = spawn_agent(config, agent_tx.clone());
-                app.active_agent = Some(handle);
+                app.spawn_agent_prompt(prompt, agent_tx);
             }
         }
     }

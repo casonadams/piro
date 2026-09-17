@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentEvent, ToolRegistry, spawn_agent};
+use crate::agent::AgentEvent;
 use crate::app::{App, InputIntent, Mode, SelectionType, parse_input_intent};
 use crate::sys::{RunnerMsg, copy, spawn_command};
 use crate::ui;
@@ -65,18 +65,7 @@ pub fn submit_input(
             app.add_command(cmd.clone(), spawn_command(cmd, runner_tx.clone()));
         }
         InputIntent::AgentPrompt(prompt) => {
-            let registry = ToolRegistry::with_defaults();
-            let backend = crate::provider::create_backend(&app.model_spec, &registry)
-                .unwrap_or_else(|_| crate::provider::default_backend(&registry))
-                .with_delta_tx(agent_tx.clone());
-            let config = crate::agent::AgentConfig {
-                prompt: prompt.clone(),
-                backend,
-                registry,
-                history: app.agent_history.clone(),
-            };
-            let handle = spawn_agent(config, agent_tx.clone());
-            app.add_agent_prompt(prompt, handle);
+            app.spawn_agent_prompt(prompt, agent_tx);
         }
     }
 }
@@ -192,18 +181,62 @@ fn handle_scroll_ctrl(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
     }
 }
 
-fn handle_scroll_action(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
+struct NavBounds {
+    max_col: u16,
+    page: usize,
+}
+
+fn handle_scroll_movement(app: &mut App, code: KeyCode, b: NavBounds) -> bool {
     match code {
-        KeyCode::Char('y') | KeyCode::Enter => {
-            if app.selection_anchor.is_none() {
-                app.selection_type = SelectionType::Line;
-                app.selection_anchor = Some(app.cursor);
-            }
-            copy_and_flash(app, ctx.width);
-            if code == KeyCode::Enter {
-                app.exit_scroll_mode();
+        KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
+        KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, b.max_col),
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
+        KeyCode::Down | KeyCode::Char('j') => {
+            let _ = app.move_cursor_down(1);
+        }
+        KeyCode::Char('0') => app.cursor.col = 2,
+        KeyCode::Char('$') => app.cursor.col = b.max_col.saturating_sub(2),
+        KeyCode::PageUp => app.move_cursor_up(b.page),
+        KeyCode::PageDown => {
+            let _ = app.move_cursor_down(b.page);
+        }
+        KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
+        _ => return false,
+    }
+    true
+}
+
+fn handle_scroll_yank(app: &mut App, code: KeyCode, width: usize) {
+    if app.selection_anchor.is_none() {
+        app.selection_type = SelectionType::Line;
+        app.selection_anchor = Some(app.cursor);
+    }
+    copy_and_flash(app, width);
+    if code == KeyCode::Enter {
+        app.exit_scroll_mode();
+    }
+}
+
+fn handle_scroll_plain(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
+    let b = NavBounds {
+        max_col: ctx.width.saturating_sub(1) as u16,
+        page: app.viewport_height.max(1),
+    };
+    if handle_scroll_movement(app, code, b) {
+        return;
+    }
+    match code {
+        KeyCode::Char('v') | KeyCode::Char(' ') => app.toggle_selection(SelectionType::Char),
+        KeyCode::Char('V') => app.toggle_selection(SelectionType::Line),
+        KeyCode::Char('o') => app.toggle_expand(),
+        KeyCode::Char('b') => {
+            if let Some(text) = app.copy_current_block() {
+                copy(&text);
+                app.copied_flash = true;
             }
         }
+        KeyCode::Char('y') | KeyCode::Enter => handle_scroll_yank(app, code, ctx.width),
         KeyCode::Esc => {
             if app.selection_anchor.is_some() {
                 app.clear_selection();
@@ -218,37 +251,6 @@ fn handle_scroll_action(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
             app.exit_scroll_mode();
         }
         _ => {}
-    }
-}
-
-fn handle_scroll_plain(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
-    let max_col = ctx.width.saturating_sub(1) as u16;
-    let page = app.viewport_height.max(1);
-    match code {
-        KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
-        KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, max_col),
-        KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
-        KeyCode::Down | KeyCode::Char('j') => {
-            let _ = app.move_cursor_down(1);
-        }
-        KeyCode::Char('0') => app.cursor.col = 2,
-        KeyCode::Char('$') => app.cursor.col = max_col.saturating_sub(2),
-        KeyCode::PageUp => app.move_cursor_up(page),
-        KeyCode::PageDown => {
-            let _ = app.move_cursor_down(page);
-        }
-        KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
-        KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
-        KeyCode::Char('v') | KeyCode::Char(' ') => app.toggle_selection(SelectionType::Char),
-        KeyCode::Char('V') => app.toggle_selection(SelectionType::Line),
-        KeyCode::Char('o') => app.toggle_expand(),
-        KeyCode::Char('b') => {
-            if let Some(text) = app.copy_current_block() {
-                copy(&text);
-                app.copied_flash = true;
-            }
-        }
-        _ => handle_scroll_action(app, code, ctx),
     }
 }
 
