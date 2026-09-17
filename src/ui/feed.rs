@@ -1,5 +1,6 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Line,
@@ -7,7 +8,7 @@ use ratatui::{
 };
 
 use super::blocks::{render_command_output_block, render_user_input_block};
-use crate::app::{App, FeedItem, Mode};
+use crate::app::{App, FeedItem, Mode, TextSelection};
 
 pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let view_h = area.height as usize;
@@ -40,8 +41,8 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let (start, end) = app.scroll.visible_range(lines.len(), view_h);
     let mut visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(end - start).collect();
 
-    // In Scroll Mode, highlight the cursor line and visual selection range
-    if app.mode == Mode::Scroll {
+    // In Keyboard Scroll Mode without mouse selection, highlight cursor and line selection
+    if app.mode == Mode::Scroll && app.mouse_selection.is_none() {
         let sel = app
             .selection_anchor
             .map(|a| (a.min(app.cursor_line), a.max(app.cursor_line)));
@@ -52,12 +53,10 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
             let is_cursor = abs_idx == app.cursor_line;
 
             if is_selected {
-                // Visual selection highlight (reversed / high-contrast)
                 for span in line.spans.iter_mut() {
                     span.style = span.style.add_modifier(Modifier::REVERSED);
                 }
             } else if is_cursor {
-                // Cursor line highlight
                 for span in line.spans.iter_mut() {
                     span.style = span.style.bg(Color::Rgb(35, 45, 60)).add_modifier(Modifier::BOLD);
                 }
@@ -74,16 +73,106 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     frame.render_widget(Paragraph::new(visible), area);
+
+    // Apply mouse drag highlight directly on frame buffer cells (character precision)
+    if let Some(ref sel) = app.mouse_selection {
+        apply_mouse_highlight(frame.buffer_mut(), sel, area);
+    }
 }
 
-pub fn get_selected_text(app: &App, width: usize) -> String {
+pub fn apply_mouse_highlight(buf: &mut Buffer, sel: &TextSelection, area: Rect) {
+    let (start, end) = sel.normalized();
+    let row_start = start.row.clamp(area.y, area.bottom().saturating_sub(1));
+    let row_end = end.row.clamp(area.y, area.bottom().saturating_sub(1));
+
+    for row in row_start..=row_end {
+        let (col_start, col_end) = if start.row == end.row {
+            (start.col.min(end.col), start.col.max(end.col))
+        } else if row == start.row {
+            (start.col, area.right().saturating_sub(1))
+        } else if row == end.row {
+            (area.x, end.col)
+        } else {
+            (area.x, area.right().saturating_sub(1))
+        };
+
+        for col in col_start..=col_end {
+            if col < buf.area().right() && row < buf.area().bottom() {
+                let cell = &mut buf[(col, row)];
+                cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
+}
+
+pub fn extract_mouse_selection_from_buf(buf: &Buffer, sel: &TextSelection, area: Rect) -> String {
+    let (start, end) = sel.normalized();
+    let row_start = start.row.clamp(area.y, area.bottom().saturating_sub(1));
+    let row_end = end.row.clamp(area.y, area.bottom().saturating_sub(1));
+
+    let mut lines = Vec::new();
+
+    for row in row_start..=row_end {
+        let (col_start, col_end) = if start.row == end.row {
+            (start.col.min(end.col), start.col.max(end.col))
+        } else if row == start.row {
+            (start.col, area.right().saturating_sub(1))
+        } else if row == end.row {
+            (area.x, end.col)
+        } else {
+            (area.x, area.right().saturating_sub(1))
+        };
+
+        let mut row_chars = String::new();
+        for col in col_start..=col_end {
+            if col < buf.area().right() && row < buf.area().bottom() {
+                let cell = &buf[(col, row)];
+                row_chars.push_str(cell.symbol());
+            }
+        }
+
+        let cleaned = clean_scraped_line(&row_chars);
+        lines.push(cleaned);
+    }
+
+    while lines.first().is_some_and(|l| l.is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+
+    lines.join("\n")
+}
+
+fn clean_scraped_line(raw: &str) -> String {
+    let mut s = raw.trim_end();
+    if s.starts_with("│ ") {
+        s = &s["│ ".len()..];
+    } else if s.starts_with('│') {
+        s = &s['│'.len_utf8()..];
+    }
+    if s.ends_with(" │") {
+        s = &s[..s.len() - " │".len()];
+    } else if s.ends_with('│') {
+        s = &s[..s.len() - '│'.len_utf8()];
+    }
+    if s.chars()
+        .all(|c| c == '─' || c == '┌' || c == '┐' || c == '└' || c == '┘' || c == ' ')
+    {
+        return String::new();
+    }
+    s.to_string()
+}
+
+pub fn get_keyboard_selected_text(app: &App, width: usize) -> String {
     let mut all_lines = Vec::new();
     for item in &app.feed {
         match item {
             FeedItem::UserInput(cmd) => all_lines.extend(render_user_input_block(cmd, width)),
             FeedItem::CommandOutput(b) => all_lines.extend(render_command_output_block(b, width)),
         }
-        all_lines.push(Line::from(""));
+        lines_push_spacer(&mut all_lines);
     }
 
     let (start_idx, end_idx) = match app.selection_anchor {
@@ -95,7 +184,7 @@ pub fn get_selected_text(app: &App, width: usize) -> String {
     for (i, line) in all_lines.iter().enumerate() {
         if i >= start_idx && i <= end_idx {
             let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let cleaned = clean_line_for_copy(&raw);
+            let cleaned = clean_scraped_line(&raw);
             if !cleaned.is_empty() {
                 result.push(cleaned);
             }
@@ -105,17 +194,6 @@ pub fn get_selected_text(app: &App, width: usize) -> String {
     result.join("\n")
 }
 
-fn clean_line_for_copy(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.starts_with('┌') || trimmed.starts_with('└') {
-        return "".into();
-    }
-    let mut s = trimmed;
-    if s.starts_with('│') {
-        s = &s['│'.len_utf8()..];
-    }
-    if s.ends_with('│') {
-        s = &s[..s.len() - '│'.len_utf8()];
-    }
-    s.trim().to_string()
+fn lines_push_spacer(lines: &mut Vec<Line<'static>>) {
+    lines.push(Line::from(""));
 }

@@ -84,14 +84,17 @@ The application provides two operational modes:
      - Highlighted lines are visually inverted (`Modifier::REVERSED`).
      - Press `y` or `Enter` to yank (copy) selected lines to the system clipboard via OSC 52 escape codes and macOS `pbcopy`.
      - Press `Esc` to cancel visual selection (or exit scroll mode if no selection is active).
-   - **Mouse Interaction**:
-     - **Scroll Up (Wheel)**: Automatically enters Scroll Mode from Input Mode and scrolls up into history.
-     - **Scroll Down (Wheel)**: Scrolls down; reaching the bottom automatically exits Scroll Mode and returns to Input Mode.
-     - **Click & Drag**: Left-click anchors selection, dragging highlights lines in real time, and **releasing the mouse automatically copies the selected lines to the clipboard** and flashes `[Copied!]`.
+   - **Character-Level Mouse Drag Selection (Maki-Style)**:
+     - Left-click and drag across any text to select words, spans, or multi-line blocks with **exact character-level precision** (not forced to full lines).
+     - The selection is highlighted in real time directly on the Ratatui frame buffer (`Modifier::REVERSED`).
+     - Releasing the mouse button scrapes the buffer cells directly, automatically strips box-drawing border glyphs (`│`), and copies clean text to the clipboard.
+   - **One-Key Block Copy**:
+     - Pressing `b` in Scroll Mode instantly copies the entire output of the current command block to the system clipboard.
    - Footer displays:
-     - Default: ` SCROLL MODE   [↑/↓/jk] Move  [v/Space] Select  [y] Copy line  [i/q/Esc] Return `
-     - When Selecting: ` VISUAL SELECT   [↑/↓/jk] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
-     - On copy: shows temporary ` [Copied!] ` confirmation.
+     - Default: ` SCROLL MODE   [↑/↓/jk] Move  [v] Select  [b] Copy block  [i/q/Esc] Return `
+     - When Selecting (Mouse): ` SELECTING   [Drag across text, release mouse to copy] `
+     - When Selecting (Keyboard): ` VISUAL SELECT   [↑/↓/jk] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
+     - On copy: shows temporary ` [Copied to clipboard!] ` confirmation.
 
 ## UI & Layout Invariants
 

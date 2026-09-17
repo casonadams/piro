@@ -42,7 +42,20 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(spans)
         }
         Mode::Scroll => {
-            if app.selection_anchor.is_some() {
+            if app.mouse_selection.is_some() {
+                let badge = Span::styled(
+                    " SELECTING ",
+                    Style::default()
+                        .bg(Color::Yellow)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let hints = Span::styled(
+                    " [Drag across text, release mouse to copy]",
+                    Style::default().fg(Color::White),
+                );
+                Line::from(vec![badge, hints])
+            } else if app.selection_anchor.is_some() {
                 let badge = Span::styled(
                     " VISUAL SELECT ",
                     Style::default()
@@ -64,13 +77,13 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                         .add_modifier(Modifier::BOLD),
                 );
                 let hints = Span::styled(
-                    " [↑/↓/jk] Move  [v/Space] Select  [y] Copy line  [i/q/Esc] Return",
+                    " [↑/↓/jk] Move  [v] Select  [b] Copy block  [i/q/Esc] Return",
                     Style::default().fg(Color::White),
                 );
                 let mut spans = vec![badge, hints];
                 if app.copied_flash {
                     spans.push(Span::styled(
-                        "  [Copied!]",
+                        "  [Copied to clipboard!]",
                         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                     ));
                 }

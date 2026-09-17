@@ -8,6 +8,46 @@ pub enum Mode {
     Scroll,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenPos {
+    pub col: u16,
+    pub row: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelection {
+    pub anchor: ScreenPos,
+    pub cursor: ScreenPos,
+}
+
+impl TextSelection {
+    pub fn new(col: u16, row: u16) -> Self {
+        let pos = ScreenPos { col, row };
+        Self {
+            anchor: pos,
+            cursor: pos,
+        }
+    }
+
+    pub fn update(&mut self, col: u16, row: u16) {
+        self.cursor = ScreenPos { col, row };
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
+
+    pub fn normalized(&self) -> (ScreenPos, ScreenPos) {
+        if self.anchor.row < self.cursor.row
+            || (self.anchor.row == self.cursor.row && self.anchor.col <= self.cursor.col)
+        {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct InputState {
     value: String,
@@ -167,6 +207,8 @@ pub struct App {
     pub viewport_height: usize,
     pub cursor_line: usize,
     pub selection_anchor: Option<usize>,
+    pub mouse_selection: Option<TextSelection>,
+    pub pending_copy: bool,
     pub copied_flash: bool,
     pub active_abort: Option<AbortHandle>,
 }
@@ -183,6 +225,8 @@ impl App {
             viewport_height: 10,
             cursor_line: 0,
             selection_anchor: None,
+            mouse_selection: None,
+            pending_copy: false,
             copied_flash: false,
             active_abort: None,
         }
@@ -251,6 +295,8 @@ impl App {
     pub fn exit_scroll_mode(&mut self) {
         self.mode = Mode::Input;
         self.selection_anchor = None;
+        self.mouse_selection = None;
+        self.pending_copy = false;
         self.copied_flash = false;
     }
 
@@ -301,29 +347,16 @@ impl App {
         }
     }
 
-    pub fn screen_row_to_feed_line(&self, row: u16) -> Option<usize> {
-        if self.total_feed_lines == 0 || self.viewport_height == 0 {
-            return None;
+    pub fn copy_current_block(&self) -> Option<String> {
+        for item in self.feed.iter().rev() {
+            if let FeedItem::CommandOutput(cmd) = item {
+                if cmd.lines.is_empty() {
+                    continue;
+                }
+                return Some(cmd.lines.join("\n"));
+            }
         }
-        let row = row as usize;
-        if row >= self.viewport_height {
-            return None;
-        }
-        let (start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
-        let visible_count = end - start;
-
-        let pad = if visible_count < self.viewport_height && self.scroll.auto_scroll {
-            self.viewport_height - visible_count
-        } else {
-            0
-        };
-
-        if row < pad {
-            None
-        } else {
-            let offset = row - pad;
-            Some((start + offset).min(self.total_feed_lines.saturating_sub(1)))
-        }
+        None
     }
 }
 
