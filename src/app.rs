@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 use tokio::task::AbortHandle;
 
@@ -16,35 +17,20 @@ pub enum SelectionType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ScreenPos {
+pub struct DocPos {
+    pub line: usize,
     pub col: u16,
-    pub row: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextSelection {
-    pub anchor: ScreenPos,
-    pub cursor: ScreenPos,
+impl PartialOrd for DocPos {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
-impl TextSelection {
-    pub fn new(anchor: ScreenPos, cursor: ScreenPos) -> Self {
-        Self { anchor, cursor }
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.anchor == self.cursor
-    }
-
-    pub fn normalized(&self) -> (ScreenPos, ScreenPos) {
-        if self.anchor.row < self.cursor.row
-            || (self.anchor.row == self.cursor.row && self.anchor.col <= self.cursor.col)
-        {
-            (self.anchor, self.cursor)
-        } else {
-            (self.cursor, self.anchor)
-        }
+impl Ord for DocPos {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.line, self.col).cmp(&(other.line, other.col))
     }
 }
 
@@ -205,11 +191,9 @@ pub struct App {
     pub scroll: ScrollState,
     pub total_feed_lines: usize,
     pub viewport_height: usize,
-    pub cursor_pos: ScreenPos,
-    pub selection_anchor: Option<ScreenPos>,
+    pub cursor: DocPos,
+    pub selection_anchor: Option<DocPos>,
     pub selection_type: SelectionType,
-    pub pending_copy: bool,
-    pub exit_after_copy: bool,
     pub copied_flash: bool,
     pub active_abort: Option<AbortHandle>,
 }
@@ -224,11 +208,9 @@ impl App {
             scroll: ScrollState::new(),
             total_feed_lines: 0,
             viewport_height: 10,
-            cursor_pos: ScreenPos::default(),
+            cursor: DocPos::default(),
             selection_anchor: None,
             selection_type: SelectionType::Char,
-            pending_copy: false,
-            exit_after_copy: false,
             copied_flash: false,
             active_abort: None,
         }
@@ -290,22 +272,20 @@ impl App {
         self.selection_anchor = None;
         self.selection_type = SelectionType::Char;
         self.copied_flash = false;
-        let row = self.viewport_height.saturating_sub(1) as u16;
-        self.cursor_pos = ScreenPos { col: 2, row };
+        let line = self.total_feed_lines.saturating_sub(1);
+        self.cursor = DocPos { line, col: 2 };
     }
 
     pub fn exit_scroll_mode(&mut self) {
         self.mode = Mode::Input;
         self.selection_anchor = None;
         self.selection_type = SelectionType::Char;
-        self.pending_copy = false;
-        self.exit_after_copy = false;
     }
 
     pub fn toggle_selection(&mut self, sel_type: SelectionType) {
         if self.selection_anchor.is_none() {
             self.selection_type = sel_type;
-            self.selection_anchor = Some(self.cursor_pos);
+            self.selection_anchor = Some(self.cursor);
         } else {
             self.selection_anchor = None;
             self.selection_type = SelectionType::Char;
@@ -317,79 +297,65 @@ impl App {
         self.selection_type = SelectionType::Char;
     }
 
-    pub fn current_selection(&self, max_col: u16) -> Option<TextSelection> {
-        self.selection_anchor.map(|anchor| match self.selection_type {
-            SelectionType::Char => TextSelection::new(anchor, self.cursor_pos),
-            SelectionType::Line => {
-                let start_row = anchor.row.min(self.cursor_pos.row);
-                let end_row = anchor.row.max(self.cursor_pos.row);
-                TextSelection::new(
-                    ScreenPos { col: 2, row: start_row },
-                    ScreenPos {
-                        col: max_col.saturating_sub(2),
-                        row: end_row,
-                    },
-                )
+    pub fn normalized_selection(&self) -> Option<(DocPos, DocPos)> {
+        self.selection_anchor.map(|anchor| {
+            if anchor <= self.cursor {
+                (anchor, self.cursor)
+            } else {
+                (self.cursor, anchor)
             }
         })
     }
 
     pub fn move_cursor_left(&mut self, delta: u16) {
-        self.cursor_pos.col = self.cursor_pos.col.saturating_sub(delta);
+        self.cursor.col = self.cursor.col.saturating_sub(delta);
     }
 
     pub fn move_cursor_right(&mut self, delta: u16, max_col: u16) {
-        self.cursor_pos.col = (self.cursor_pos.col + delta).min(max_col);
+        self.cursor.col = (self.cursor.col + delta).min(max_col);
     }
 
-    pub fn move_cursor_up(&mut self, delta: u16) {
-        if self.cursor_pos.row >= delta {
-            self.cursor_pos.row -= delta;
-        } else {
-            let overflow = delta - self.cursor_pos.row;
-            self.cursor_pos.row = 0;
-            self.scroll_up(overflow as usize);
+    pub fn move_cursor_up(&mut self, delta: usize) {
+        self.cursor.line = self.cursor.line.saturating_sub(delta);
+        let (start, _end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        if self.cursor.line < start {
+            self.scroll
+                .scroll_up(start - self.cursor.line, self.total_feed_lines, self.viewport_height);
         }
     }
 
-    pub fn move_cursor_down(&mut self, delta: u16, max_row: u16) -> bool {
-        if self.cursor_pos.row < max_row {
-            let target = self.cursor_pos.row + delta;
-            if target <= max_row {
-                self.cursor_pos.row = target;
-            } else {
-                let overflow = target - max_row;
-                self.cursor_pos.row = max_row;
-                if self.scroll.scroll_from_bottom > 0 {
-                    self.scroll_down(overflow as usize);
-                }
+    pub fn move_cursor_down(&mut self, delta: usize) -> bool {
+        let max_line = self.total_feed_lines.saturating_sub(1);
+        if self.cursor.line < max_line {
+            self.cursor.line = (self.cursor.line + delta).min(max_line);
+            let (_start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+            if self.cursor.line >= end {
+                self.scroll.scroll_down(self.cursor.line - end + 1);
             }
             false
         } else if self.scroll.scroll_from_bottom > 0 {
-            self.scroll_down(delta as usize);
+            self.scroll_down(delta);
             false
         } else {
+            // Already at the bottom line of the document and at bottom of viewport
             true
         }
     }
 
-    pub fn scroll_up(&mut self, delta: usize) {
-        self.scroll
-            .scroll_up(delta, self.total_feed_lines, self.viewport_height);
-    }
-
     pub fn scroll_down(&mut self, delta: usize) {
         self.scroll.scroll_down(delta);
+        let (start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        self.cursor.line = self.cursor.line.clamp(start, end.saturating_sub(1));
     }
 
     pub fn scroll_to_top(&mut self) {
         self.scroll.scroll_to_top(self.total_feed_lines, self.viewport_height);
-        self.cursor_pos.row = 0;
+        self.cursor.line = 0;
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll.scroll_to_bottom();
-        self.cursor_pos.row = self.viewport_height.saturating_sub(1) as u16;
+        self.cursor.line = self.total_feed_lines.saturating_sub(1);
     }
 
     pub fn copy_current_block(&self) -> Option<String> {
@@ -402,6 +368,26 @@ impl App {
             }
         }
         None
+    }
+
+    pub fn screen_coords_to_doc_pos(&self, col: u16, row: u16) -> Option<DocPos> {
+        if self.total_feed_lines == 0 || self.viewport_height == 0 {
+            return None;
+        }
+        let (start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        let count = end - start;
+        let pad = if count < self.viewport_height && self.scroll.auto_scroll {
+            self.viewport_height - count
+        } else {
+            0
+        };
+
+        let row = row as usize;
+        if row < pad {
+            return None;
+        }
+        let line = (start + (row - pad)).min(self.total_feed_lines.saturating_sub(1));
+        Some(DocPos { line, col })
     }
 }
 
@@ -449,33 +435,28 @@ mod tests {
 
         app.enter_scroll_mode();
         assert_eq!(app.mode, Mode::Scroll);
-        assert_eq!(app.cursor_pos.row, 19);
+        assert_eq!(app.cursor.line, 49);
         assert_eq!(app.selection_anchor, None);
 
         // Character visual selection
         app.toggle_selection(SelectionType::Char);
-        assert_eq!(app.selection_anchor, Some(ScreenPos { col: 2, row: 19 }));
+        assert_eq!(app.selection_anchor, Some(DocPos { line: 49, col: 2 }));
 
         app.move_cursor_up(5);
-        assert_eq!(app.cursor_pos.row, 14);
+        assert_eq!(app.cursor.line, 44);
 
-        let sel = app.current_selection(80).unwrap();
-        let (start, end) = sel.normalized();
-        assert_eq!(start.row, 14);
-        assert_eq!(end.row, 19);
+        let (start, end) = app.normalized_selection().unwrap();
+        assert_eq!(start.line, 44);
+        assert_eq!(end.line, 49);
 
         // Line visual selection (Shift+V)
         app.toggle_selection(SelectionType::Line); // cancels current selection
         app.toggle_selection(SelectionType::Line);
         assert_eq!(app.selection_type, SelectionType::Line);
 
-        let line_sel = app.current_selection(80).unwrap();
-        assert_eq!(line_sel.anchor.col, 2);
-        assert_eq!(line_sel.cursor.col, 78);
-
         app.clear_selection();
         assert_eq!(app.selection_anchor, None);
-        assert_eq!(app.current_selection(80), None);
+        assert_eq!(app.normalized_selection(), None);
 
         app.exit_scroll_mode();
         assert_eq!(app.mode, Mode::Input);
@@ -489,17 +470,18 @@ mod tests {
 
         app.enter_scroll_mode();
         app.move_cursor_up(10);
-        assert_eq!(app.cursor_pos.row, 9);
+        assert_eq!(app.cursor.line, 39);
 
-        let past = app.move_cursor_down(5, 19);
+        let past = app.move_cursor_down(5);
         assert!(!past);
-        assert_eq!(app.cursor_pos.row, 14);
+        assert_eq!(app.cursor.line, 44);
 
-        let past = app.move_cursor_down(10, 19);
+        let past = app.move_cursor_down(10);
         assert!(!past);
-        assert_eq!(app.cursor_pos.row, 19);
+        assert_eq!(app.cursor.line, 49);
 
-        let past = app.move_cursor_down(2, 19);
+        // Now scrolling down past the bottom-most line signals exit!
+        let past = app.move_cursor_down(2);
         assert!(past);
     }
 }

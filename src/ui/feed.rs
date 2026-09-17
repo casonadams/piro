@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use super::blocks::{render_command_output_block, render_user_input_block};
-use crate::app::{App, FeedItem, Mode, TextSelection};
+use crate::app::{App, FeedItem, Mode, SelectionType};
 
 pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let view_h = area.height as usize;
@@ -41,9 +41,15 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let (start, end) = app.scroll.visible_range(lines.len(), view_h);
     let mut visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(end - start).collect();
 
+    let count = visible.len();
+    let pad = if count < view_h && app.scroll.auto_scroll {
+        view_h - count
+    } else {
+        0
+    };
+
     // Bottom-anchor content if it fits within the viewport height and auto-scrolling
-    if visible.len() < view_h && app.scroll.auto_scroll {
-        let pad = view_h - visible.len();
+    if pad > 0 {
         let mut padded = vec![Line::from(""); pad];
         padded.extend(visible);
         visible = padded;
@@ -51,83 +57,112 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
 
     frame.render_widget(Paragraph::new(visible), area);
 
-    // Apply visual selection highlight across cells in the buffer
-    let max_col = area.width.saturating_sub(1);
-    if let Some(sel) = app.current_selection(max_col) {
-        apply_selection_highlight(frame.buffer_mut(), &sel, area);
-    }
-
-    // In Scroll Mode, place the hardware terminal cursor directly at the cursor position
+    // In Scroll Mode, apply visual selection highlight directly to buffer cells
     if app.mode == Mode::Scroll {
-        let cur_x = area.x + app.cursor_pos.col.min(area.width.saturating_sub(1));
-        let cur_y = area.y + app.cursor_pos.row.min(area.height.saturating_sub(1));
-        frame.set_cursor_position(Position::new(cur_x, cur_y));
+        if app.normalized_selection().is_some() {
+            apply_doc_selection(frame.buffer_mut(), app, start, pad, area);
+        }
+
+        // Place the hardware cursor at the active DocPos if it's currently on screen
+        if app.cursor.line >= start && app.cursor.line < end {
+            let screen_row = area.y + (pad + (app.cursor.line - start)) as u16;
+            let screen_col = area.x + app.cursor.col.min(area.width.saturating_sub(1));
+            frame.set_cursor_position(Position::new(screen_col, screen_row));
+        }
     }
 }
 
-pub fn apply_selection_highlight(buf: &mut Buffer, sel: &TextSelection, area: Rect) {
-    let (start, end) = sel.normalized();
-    let row_start = start.row.clamp(area.y, area.bottom().saturating_sub(1));
-    let row_end = end.row.clamp(area.y, area.bottom().saturating_sub(1));
+fn apply_doc_selection(buf: &mut Buffer, app: &App, start_line: usize, pad: usize, area: Rect) {
+    let Some((sel_start, sel_end)) = app.normalized_selection() else {
+        return;
+    };
+    let right = area.right().saturating_sub(1);
 
-    for row in row_start..=row_end {
-        let (col_start, col_end) = if start.row == end.row {
-            (start.col.min(end.col), start.col.max(end.col))
-        } else if row == start.row {
-            (start.col, area.right().saturating_sub(1))
-        } else if row == end.row {
-            (area.x, end.col)
-        } else {
-            (area.x, area.right().saturating_sub(1))
-        };
+    for (row_idx, line_num) in (start_line..).enumerate() {
+        let screen_row = area.y + (pad + row_idx) as u16;
+        if screen_row >= area.bottom() {
+            break;
+        }
 
-        for col in col_start..=col_end {
-            if col < buf.area().right() && row < buf.area().bottom() {
-                let cell = &mut buf[(col, row)];
-                cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+        if line_num >= sel_start.line && line_num <= sel_end.line {
+            let (col_start, col_end) = match app.selection_type {
+                SelectionType::Line => (area.x, right),
+                SelectionType::Char => {
+                    if sel_start.line == sel_end.line {
+                        (sel_start.col.min(sel_end.col), sel_start.col.max(sel_end.col))
+                    } else if line_num == sel_start.line {
+                        (sel_start.col, right)
+                    } else if line_num == sel_end.line {
+                        (area.x, sel_end.col)
+                    } else {
+                        (area.x, right)
+                    }
+                }
+            };
+
+            for col in col_start..=col_end {
+                if col < buf.area().right() && screen_row < buf.area().bottom() {
+                    let cell = &mut buf[(col, screen_row)];
+                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                }
             }
         }
     }
 }
 
-pub fn extract_selection_from_buf(buf: &Buffer, sel: &TextSelection, area: Rect) -> String {
-    let (start, end) = sel.normalized();
-    let row_start = start.row.clamp(area.y, area.bottom().saturating_sub(1));
-    let row_end = end.row.clamp(area.y, area.bottom().saturating_sub(1));
+pub fn extract_selected_text(app: &App, width: usize) -> String {
+    let mut all_lines = Vec::new();
+    for item in &app.feed {
+        match item {
+            FeedItem::UserInput(cmd) => lines_extend(&mut all_lines, render_user_input_block(cmd, width)),
+            FeedItem::CommandOutput(b) => lines_extend(&mut all_lines, render_command_output_block(b, width)),
+        }
+        all_lines.push(Line::from(""));
+    }
 
-    let mut lines = Vec::new();
+    let (sel_start, sel_end) = match app.normalized_selection() {
+        Some((s, e)) => (s, e),
+        None => (app.cursor, app.cursor),
+    };
 
-    for row in row_start..=row_end {
-        let (col_start, col_end) = if start.row == end.row {
-            (start.col.min(end.col), start.col.max(end.col))
-        } else if row == start.row {
-            (start.col, area.right().saturating_sub(1))
-        } else if row == end.row {
-            (area.x, end.col)
-        } else {
-            (area.x, area.right().saturating_sub(1))
-        };
+    let mut result = Vec::new();
+    let start_idx = sel_start.line.min(all_lines.len());
+    let end_limit = (sel_end.line + 1).min(all_lines.len());
 
-        let mut row_chars = String::new();
-        for col in col_start..=col_end {
-            if col < buf.area().right() && row < buf.area().bottom() {
-                let cell = &buf[(col, row)];
-                row_chars.push_str(cell.symbol());
+    if start_idx < end_limit {
+        for line in &all_lines[start_idx..end_limit] {
+            let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let cleaned = clean_scraped_line(&raw);
+
+            if cleaned.is_empty() {
+                continue;
+            }
+
+            let snippet = if app.selection_type == SelectionType::Char && sel_start.line == sel_end.line {
+                let start_col = (sel_start.col.min(sel_end.col) as usize).saturating_sub(2);
+                let end_col = (sel_start.col.max(sel_end.col) as usize).saturating_sub(2);
+                let chars: Vec<char> = cleaned.chars().collect();
+                if start_col < chars.len() {
+                    let end = end_col.min(chars.len());
+                    chars[start_col..end].iter().collect()
+                } else {
+                    cleaned
+                }
+            } else {
+                cleaned
+            };
+
+            if !snippet.is_empty() {
+                result.push(snippet);
             }
         }
-
-        let cleaned = clean_scraped_line(&row_chars);
-        lines.push(cleaned);
     }
 
-    while lines.first().is_some_and(|l| l.is_empty()) {
-        lines.remove(0);
-    }
-    while lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
-    }
+    result.join("\n")
+}
 
-    lines.join("\n")
+fn lines_extend(target: &mut Vec<Line<'static>>, source: Vec<Line<'static>>) {
+    target.extend(source);
 }
 
 fn clean_scraped_line(raw: &str) -> String {
