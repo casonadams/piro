@@ -174,6 +174,7 @@ pub enum CommandStatus {
 #[derive(Debug, Clone)]
 pub struct CommandOutputBlock {
     pub command: String,
+    pub tool: Option<String>,
     pub status: CommandStatus,
     pub lines: Vec<String>,
     pub started_at: Instant,
@@ -185,15 +186,7 @@ pub struct CommandOutputBlock {
 pub enum FeedItem {
     UserInput(String),
     CommandOutput(CommandOutputBlock),
-    #[allow(dead_code)]
     AgentThought(String),
-    #[allow(dead_code)]
-    ToolCall {
-        name: String,
-        input: String,
-        block: CommandOutputBlock,
-    },
-    #[allow(dead_code)]
     AgentResponse(String),
 }
 
@@ -336,6 +329,7 @@ impl App {
         self.feed.push(FeedItem::UserInput(cmd.clone()));
         self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command: cmd,
+            tool: None,
             status: CommandStatus::Running,
             lines: Vec::new(),
             started_at: Instant::now(),
@@ -362,40 +356,17 @@ impl App {
     }
 
     pub fn start_agent_tool(&mut self, name: String, input: String) {
-        self.feed.push(FeedItem::ToolCall {
-            name,
-            input: input.clone(),
-            block: CommandOutputBlock {
-                command: input,
-                status: CommandStatus::Running,
-                lines: Vec::new(),
-                started_at: Instant::now(),
-                duration: None,
-                expanded: false,
-            },
-        });
+        self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
+            command: input,
+            tool: Some(name),
+            status: CommandStatus::Running,
+            lines: Vec::new(),
+            started_at: Instant::now(),
+            duration: None,
+            expanded: false,
+        }));
         self.scroll.scroll_from_bottom = 0;
         self.scroll.auto_scroll = true;
-    }
-
-    pub fn append_agent_tool_line(&mut self, line: String) {
-        if let Some(FeedItem::ToolCall { block, .. }) = self.feed.last_mut() {
-            if block.lines.len() >= 5000 {
-                block.lines.remove(0);
-            }
-            block.lines.push(line);
-        }
-    }
-
-    pub fn complete_agent_tool(&mut self, success: bool, exit_code: Option<i32>, duration: Duration) {
-        if let Some(FeedItem::ToolCall { block, .. }) = self.feed.last_mut() {
-            block.duration = Some(duration);
-            block.status = if success {
-                CommandStatus::Success(exit_code.unwrap_or(0))
-            } else {
-                CommandStatus::Failed(exit_code.unwrap_or(1))
-            };
-        }
     }
 
     pub fn add_agent_response(&mut self, response: String) {
@@ -409,35 +380,23 @@ impl App {
     }
 
     pub fn append_output_line(&mut self, line: String) {
-        if !self.is_command_running() {
-            return;
-        }
-        match self.feed.last_mut() {
-            Some(FeedItem::CommandOutput(b)) | Some(FeedItem::ToolCall { block: b, .. }) => {
-                if b.lines.len() >= 5000 {
-                    b.lines.remove(0);
-                }
-                b.lines.push(line);
+        if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
+            if b.lines.len() >= 5000 {
+                b.lines.remove(0);
             }
-            _ => {}
+            b.lines.push(line);
         }
     }
 
     pub fn complete_command(&mut self, code: Option<i32>, dur: Duration) {
-        if !self.is_command_running() {
-            return;
-        }
         self.active_process = None;
-        match self.feed.last_mut() {
-            Some(FeedItem::CommandOutput(b)) | Some(FeedItem::ToolCall { block: b, .. }) => {
-                b.duration = Some(dur);
-                b.status = match code {
-                    Some(0) => CommandStatus::Success(0),
-                    Some(c) => CommandStatus::Failed(c),
-                    None => CommandStatus::Failed(-1),
-                };
-            }
-            _ => {}
+        if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
+            b.duration = Some(dur);
+            b.status = match code {
+                Some(0) => CommandStatus::Success(0),
+                Some(c) => CommandStatus::Failed(c),
+                None => CommandStatus::Failed(-1),
+            };
         }
     }
 
@@ -449,12 +408,9 @@ impl App {
         }
         if let Some(mut h) = self.active_process.take() {
             h.kill();
-            match self.feed.last_mut() {
-                Some(FeedItem::CommandOutput(b)) | Some(FeedItem::ToolCall { block: b, .. }) => {
-                    b.duration = Some(b.started_at.elapsed());
-                    b.status = CommandStatus::Cancelled;
-                }
-                _ => {}
+            if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
+                b.duration = Some(b.started_at.elapsed());
+                b.status = CommandStatus::Cancelled;
             }
             cancelled = true;
         }
@@ -553,7 +509,6 @@ impl App {
     pub fn copy_current_block(&self) -> Option<String> {
         self.feed.iter().rev().find_map(|item| match item {
             FeedItem::CommandOutput(c) if !c.lines.is_empty() => Some(c.lines.join("\n")),
-            FeedItem::ToolCall { block, .. } if !block.lines.is_empty() => Some(block.lines.join("\n")),
             FeedItem::AgentThought(t) if !t.is_empty() => Some(t.clone()),
             FeedItem::AgentResponse(r) if !r.is_empty() => Some(r.clone()),
             _ => None,
@@ -562,12 +517,9 @@ impl App {
 
     pub fn toggle_expand(&mut self) {
         for item in self.feed.iter_mut().rev() {
-            match item {
-                FeedItem::CommandOutput(b) | FeedItem::ToolCall { block: b, .. } => {
-                    b.expanded = !b.expanded;
-                    break;
-                }
-                _ => {}
+            if let FeedItem::CommandOutput(b) = item {
+                b.expanded = !b.expanded;
+                break;
             }
         }
     }

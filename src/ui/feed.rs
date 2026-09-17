@@ -9,7 +9,7 @@ use ratatui::{
 
 use super::blocks::{
     FormattedLine, render_agent_response_block, render_agent_thought_block, render_command_output_block,
-    render_tool_call_block, render_user_input_block,
+    render_user_input_block,
 };
 use crate::app::{App, FeedItem, Mode, SelectionType};
 
@@ -18,7 +18,6 @@ pub fn format_feed_item(item: &FeedItem, width: usize) -> Vec<FormattedLine> {
         FeedItem::UserInput(cmd) => render_user_input_block(cmd, width),
         FeedItem::CommandOutput(b) => render_command_output_block(b, width),
         FeedItem::AgentThought(t) => render_agent_thought_block(t, width),
-        FeedItem::ToolCall { name, input, block } => render_tool_call_block(name, input, block, width),
         FeedItem::AgentResponse(r) => render_agent_response_block(r, width),
     }
 }
@@ -212,6 +211,7 @@ mod tests {
             "This is a very long line that will definitely exceed forty characters and wrap without soft line breaks";
         app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command: "echo test".into(),
+            tool: None,
             status: CommandStatus::Success(0),
             lines: vec![long_line.into()],
             started_at: Instant::now(),
@@ -244,18 +244,15 @@ mod tests {
     fn test_extract_thought_and_response_text() {
         let mut app = App::new();
         app.feed.push(FeedItem::AgentThought("Reasoning about solution".into()));
-        app.feed.push(FeedItem::ToolCall {
-            name: "bash".into(),
-            input: "echo test".into(),
-            block: CommandOutputBlock {
-                command: "echo test".into(),
-                status: CommandStatus::Success(0),
-                lines: vec!["tool result line".into()],
-                started_at: Instant::now(),
-                duration: Some(std::time::Duration::from_millis(10)),
-                expanded: false,
-            },
-        });
+        app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
+            command: "echo test".into(),
+            tool: Some("bash".into()),
+            status: CommandStatus::Success(0),
+            lines: vec!["tool result line".into()],
+            started_at: Instant::now(),
+            duration: Some(std::time::Duration::from_millis(10)),
+            expanded: false,
+        }));
         app.feed.push(FeedItem::AgentResponse("Final answer here".into()));
 
         let width = 40;

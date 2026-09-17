@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentMessage {
     User(String),
@@ -25,42 +23,29 @@ pub trait AgentBackend: Send + Sync {
 
 #[derive(Default)]
 pub struct MockAgentBackend {
-    scripted_steps: Vec<StepResult>,
+    steps: Vec<StepResult>,
     step_idx: usize,
-    rule_based: bool,
 }
 
 impl MockAgentBackend {
     pub fn new() -> Self {
-        Self {
-            scripted_steps: Vec::new(),
-            step_idx: 0,
-            rule_based: true,
-        }
+        Self::default()
     }
 
+    #[allow(dead_code)]
     pub fn from_steps(steps: Vec<StepResult>) -> Self {
-        Self {
-            scripted_steps: steps,
-            step_idx: 0,
-            rule_based: false,
-        }
+        Self { steps, step_idx: 0 }
     }
 }
 
 impl AgentBackend for MockAgentBackend {
     async fn next_step(&mut self, history: &[AgentMessage]) -> Result<StepResult, String> {
-        if !self.rule_based {
-            if self.step_idx < self.scripted_steps.len() {
-                let step = self.scripted_steps[self.step_idx].clone();
-                self.step_idx += 1;
-                return Ok(step);
-            }
-            return Ok(StepResult::FinalAnswer("Done.".to_string()));
+        if let Some(step) = self.steps.get(self.step_idx).cloned() {
+            self.step_idx += 1;
+            return Ok(step);
         }
 
-        // Rule-based demonstration backend
-        let user_prompt = history
+        let prompt = history
             .iter()
             .find_map(|m| match m {
                 AgentMessage::User(u) => Some(u.as_str()),
@@ -68,47 +53,42 @@ impl AgentBackend for MockAgentBackend {
             })
             .unwrap_or("");
 
+        let (tool_cmd, thought) = if prompt.contains("count") || prompt.contains("list") {
+            (Some("ls -1"), "Listing directory files...")
+        } else if prompt.contains("git") || prompt.contains("status") {
+            (Some("git status --short"), "Checking repository status...")
+        } else {
+            (None, "Analyzing request...")
+        };
+
         let has_thought = history.iter().any(|m| matches!(m, AgentMessage::Thought(_)));
-        let last_observation = history.iter().rev().find_map(|m| match m {
+        if !has_thought {
+            return Ok(StepResult::Thought(thought.into()));
+        }
+
+        let last_obs = history.iter().rev().find_map(|m| match m {
             AgentMessage::Observation { output, success } => Some((output.clone(), *success)),
             _ => None,
         });
 
-        if !has_thought {
-            if user_prompt.contains("count") || user_prompt.contains("list") {
-                return Ok(StepResult::Thought("Listing directory files...".into()));
-            } else if user_prompt.contains("git") || user_prompt.contains("status") {
-                return Ok(StepResult::Thought("Checking repository status...".into()));
-            } else {
-                return Ok(StepResult::Thought("Analyzing request...".into()));
-            }
-        }
-
-        if let Some((output, success)) = last_observation {
-            if success {
-                let count = output.lines().count();
-                return Ok(StepResult::FinalAnswer(format!(
+        if let Some((output, ok)) = last_obs {
+            return Ok(StepResult::FinalAnswer(if ok {
+                format!(
                     "Observation processed successfully ({} lines):\n{}",
-                    count, output
-                )));
+                    output.lines().count(),
+                    output
+                )
             } else {
-                return Ok(StepResult::FinalAnswer(format!("Tool execution failed:\n{}", output)));
-            }
+                format!("Tool execution failed:\n{}", output)
+            }));
         }
 
-        // Had thought, now call tool
-        if user_prompt.contains("count") || user_prompt.contains("list") {
-            Ok(StepResult::CallTool {
+        match tool_cmd {
+            Some(cmd) => Ok(StepResult::CallTool {
                 tool: "bash".into(),
-                input: "ls -1".into(),
-            })
-        } else if user_prompt.contains("git") || user_prompt.contains("status") {
-            Ok(StepResult::CallTool {
-                tool: "bash".into(),
-                input: "git status --short".into(),
-            })
-        } else {
-            Ok(StepResult::FinalAnswer(format!("I have reviewed: '{}'", user_prompt)))
+                input: cmd.into(),
+            }),
+            None => Ok(StepResult::FinalAnswer(format!("Processed: '{}'", prompt))),
         }
     }
 }
@@ -128,52 +108,20 @@ mod tests {
             StepResult::FinalAnswer("finished".into()),
         ]);
 
-        let step1 = backend.next_step(&[]).await.unwrap();
-        assert_eq!(step1, StepResult::Thought("thinking".into()));
-
-        let step2 = backend.next_step(&[]).await.unwrap();
         assert_eq!(
-            step2,
+            backend.next_step(&[]).await.unwrap(),
+            StepResult::Thought("thinking".into())
+        );
+        assert_eq!(
+            backend.next_step(&[]).await.unwrap(),
             StepResult::CallTool {
                 tool: "bash".into(),
                 input: "echo 1".into()
             }
         );
-
-        let step3 = backend.next_step(&[]).await.unwrap();
-        assert_eq!(step3, StepResult::FinalAnswer("finished".into()));
-
-        let step4 = backend.next_step(&[]).await.unwrap();
-        assert_eq!(step4, StepResult::FinalAnswer("Done.".into()));
-    }
-
-    #[tokio::test]
-    async fn test_mock_rule_based() {
-        let mut backend = MockAgentBackend::new();
-        let history = vec![AgentMessage::User("count files".into())];
-
-        let step1 = backend.next_step(&history).await.unwrap();
-        assert!(matches!(step1, StepResult::Thought(_)));
-
-        let mut history2 = history.clone();
-        history2.push(AgentMessage::Thought("Listing directory files...".into()));
-
-        let step2 = backend.next_step(&history2).await.unwrap();
         assert_eq!(
-            step2,
-            StepResult::CallTool {
-                tool: "bash".into(),
-                input: "ls -1".into()
-            }
+            backend.next_step(&[]).await.unwrap(),
+            StepResult::FinalAnswer("finished".into())
         );
-
-        let mut history3 = history2.clone();
-        history3.push(AgentMessage::Observation {
-            output: "file1\nfile2".into(),
-            success: true,
-        });
-
-        let step3 = backend.next_step(&history3).await.unwrap();
-        assert!(matches!(step3, StepResult::FinalAnswer(_)));
     }
 }

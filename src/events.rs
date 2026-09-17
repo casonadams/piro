@@ -187,20 +187,15 @@ pub fn handle_scroll_key(
                 app.copied_flash = true;
             }
         }
-        KeyCode::Char('y') => {
+        KeyCode::Char('y') | KeyCode::Enter => {
             if app.selection_anchor.is_none() {
                 app.selection_type = SelectionType::Line;
                 app.selection_anchor = Some(app.cursor);
             }
             copy_and_flash(app, width);
-        }
-        KeyCode::Enter => {
-            if app.selection_anchor.is_none() {
-                app.selection_type = SelectionType::Line;
-                app.selection_anchor = Some(app.cursor);
+            if key.code == KeyCode::Enter {
+                app.exit_scroll_mode();
             }
-            copy_and_flash(app, width);
-            app.exit_scroll_mode();
         }
         KeyCode::Esc => {
             if app.selection_anchor.is_some() {

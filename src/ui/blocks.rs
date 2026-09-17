@@ -189,28 +189,32 @@ pub fn render_command_block_with_title(
 }
 
 pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
-    render_command_block_with_title(None, &block.command, block, width)
+    let title = block.tool.as_deref().map(|t| format!(" Tool: {} ", t));
+    render_command_block_with_title(title.as_deref(), &block.command, block, width)
 }
 
-pub fn render_tool_call_block(tool: &str, input: &str, block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
-    render_command_block_with_title(Some(&format!(" Tool: {} ", tool)), input, block, width)
-}
-
-pub fn render_agent_thought_block(thought: &str, width: usize) -> Vec<FormattedLine> {
-    let style = Style::default().fg(Color::Magenta);
+fn render_text_card(
+    title: &str,
+    text: &str,
+    color: Color,
+    empty_hint: Option<&str>,
+    width: usize,
+) -> Vec<FormattedLine> {
+    let style = Style::default().fg(color);
     let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
     let inner_w = width.saturating_sub(4);
     let mut lines = vec![FormattedLine {
-        line: box_titled_border('┌', " Thought ", '─', '┐', width, style),
+        line: box_titled_border('┌', title, '─', '┐', width, style),
         is_continuation: false,
     }];
-    if thought.trim().is_empty() {
+    if text.trim().is_empty() {
+        let hint = empty_hint.unwrap_or("");
         lines.push(FormattedLine {
-            line: box_line(vec![Span::styled(pad_spaces("Thinking...", inner_w), dim)], style),
+            line: box_line(vec![Span::styled(pad_spaces(hint, inner_w), dim)], style),
             is_continuation: false,
         });
     } else {
-        for (idx, wrapped) in wrap_ansi(thought, inner_w).into_iter().enumerate() {
+        for (idx, wrapped) in wrap_ansi(text, inner_w).into_iter().enumerate() {
             lines.push(FormattedLine {
                 line: box_line(wrapped, style),
                 is_continuation: idx > 0,
@@ -224,24 +228,12 @@ pub fn render_agent_thought_block(thought: &str, width: usize) -> Vec<FormattedL
     lines
 }
 
+pub fn render_agent_thought_block(thought: &str, width: usize) -> Vec<FormattedLine> {
+    render_text_card(" Thought ", thought, Color::Magenta, Some("Thinking..."), width)
+}
+
 pub fn render_agent_response_block(response: &str, width: usize) -> Vec<FormattedLine> {
-    let style = Style::default().fg(Color::Cyan);
-    let inner_w = width.saturating_sub(4);
-    let mut lines = vec![FormattedLine {
-        line: box_titled_border('┌', " Agent ", '─', '┐', width, style),
-        is_continuation: false,
-    }];
-    for (idx, wrapped) in wrap_ansi(response, inner_w).into_iter().enumerate() {
-        lines.push(FormattedLine {
-            line: box_line(wrapped, style),
-            is_continuation: idx > 0,
-        });
-    }
-    lines.push(FormattedLine {
-        line: box_border('└', '─', '┘', width, style),
-        is_continuation: false,
-    });
-    lines
+    render_text_card(" Agent ", response, Color::Cyan, None, width)
 }
 
 #[cfg(test)]
@@ -266,17 +258,18 @@ mod tests {
     }
 
     #[test]
-    fn test_render_tool_call_block() {
+    fn test_render_tool_command_output_block() {
         let width = 50;
         let block = CommandOutputBlock {
             command: "echo test".into(),
+            tool: Some("bash".into()),
             status: CommandStatus::Success(0),
             lines: vec!["output 1".into(), "output 2".into()],
             started_at: Instant::now(),
             duration: Some(std::time::Duration::from_millis(150)),
             expanded: false,
         };
-        let lines = render_tool_call_block("bash", "echo test", &block, width);
+        let lines = render_command_output_block(&block, width);
         let top_str = &lines[0].line.spans[0].content;
         assert!(top_str.contains("Tool: bash"));
         assert_eq!(str_width(top_str), width);

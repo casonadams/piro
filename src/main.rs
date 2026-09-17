@@ -62,9 +62,9 @@ async fn main() -> std::io::Result<()> {
             Some(event) = agent_rx.recv() => match event {
                 AgentEvent::Thought(thought) => app.add_agent_thought(thought),
                 AgentEvent::ToolStart { name, input } => app.start_agent_tool(name, input),
-                AgentEvent::ToolOutput(line) => app.append_agent_tool_line(line),
-                AgentEvent::ToolDone { success, exit_code, duration } => {
-                    app.complete_agent_tool(success, exit_code, duration);
+                AgentEvent::ToolOutput(line) => app.append_output_line(line),
+                AgentEvent::ToolDone { exit_code, duration } => {
+                    app.complete_command(exit_code, duration);
                 }
                 AgentEvent::Response(resp) => app.add_agent_response(resp),
                 AgentEvent::Finished | AgentEvent::Cancelled => app.finish_agent(),
