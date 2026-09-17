@@ -74,7 +74,7 @@ The application provides two operational modes:
      - `Ctrl+L`: Clear feed history (fresh canvas).
      - `Ctrl+S` / `PageUp`: Enter Scroll Mode.
    - **Command History (Bash-Style Persistence)**:
-     - Automatically saves executed commands to `~/.piro_history` across sessions.
+     - Automatically saves executed commands to `.piro/history` across sessions (checks local `./.piro/` then defaults to `~/.piro/history`).
      - `Up` / `Ctrl+P`: cycles backward through previous commands.
      - `Down` / `Ctrl+N`: cycles forward, restoring any in-progress draft.
      - Automatically deduplicates consecutive identical commands.

@@ -272,20 +272,42 @@ impl App {
         app
     }
 
-    fn history_file_path() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-        let piro_path = PathBuf::from(&home).join(".piro_history");
-        let legacy_path = PathBuf::from(&home).join(".tuitest_history");
-        if !piro_path.exists() && legacy_path.exists() {
-            let _ = std::fs::rename(&legacy_path, &piro_path);
+    pub fn piro_dir() -> PathBuf {
+        let local = PathBuf::from(".piro");
+        if local.is_dir() {
+            return local;
         }
-        Some(piro_path)
+
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        home.join(".piro")
+    }
+
+    pub fn history_file_path() -> PathBuf {
+        let dir = Self::piro_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let history_file = dir.join("history");
+
+        if !history_file.exists() {
+            let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+                return history_file;
+            };
+            let legacy_piro = PathBuf::from(&home).join(".piro_history");
+            let legacy_tui = PathBuf::from(&home).join(".tuitest_history");
+            if legacy_piro.exists() {
+                let _ = std::fs::rename(&legacy_piro, &history_file);
+            } else if legacy_tui.exists() {
+                let _ = std::fs::rename(&legacy_tui, &history_file);
+            }
+        }
+
+        history_file
     }
 
     pub fn load_history(&mut self) {
-        let Some(path) = Self::history_file_path() else {
-            return;
-        };
+        let path = Self::history_file_path();
         let Ok(content) = std::fs::read_to_string(path) else {
             return;
         };
@@ -301,9 +323,7 @@ impl App {
     }
 
     fn save_history_entry(cmd: &str) {
-        let Some(path) = Self::history_file_path() else {
-            return;
-        };
+        let path = Self::history_file_path();
         use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(file, "{}", cmd);
@@ -585,5 +605,13 @@ mod tests {
 
         assert!(!app.move_cursor_down(5));
         assert!(app.move_cursor_down(1));
+    }
+
+    #[test]
+    fn test_piro_paths() {
+        let dir = App::piro_dir();
+        assert!(dir.to_string_lossy().contains(".piro"));
+        let hist = App::history_file_path();
+        assert!(hist.to_string_lossy().ends_with("history"));
     }
 }
