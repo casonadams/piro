@@ -30,7 +30,7 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut lines = Vec::new();
     for item in &app.feed {
         match item {
-            FeedItem::UserInput(b) => lines.extend(render_user_input_block(b, width)),
+            FeedItem::UserInput(cmd) => lines.extend(render_user_input_block(cmd, width)),
             FeedItem::CommandOutput(b) => lines.extend(render_command_output_block(b, width)),
         }
         lines.push(Line::from(""));

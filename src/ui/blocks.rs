@@ -6,7 +6,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{CommandOutputBlock, CommandStatus, UserInputBlock};
+use crate::app::{CommandOutputBlock, CommandStatus};
 
 fn box_border(left: char, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
     let inner = fill.to_string().repeat(width.saturating_sub(2));
@@ -20,10 +20,10 @@ fn box_line(spans: Vec<Span<'static>>, border_style: Style) -> Line<'static> {
     Line::from(line_spans)
 }
 
-pub fn render_user_input_block(block: &UserInputBlock, width: usize) -> Vec<Line<'static>> {
+pub fn render_user_input_block(command: &str, width: usize) -> Vec<Line<'static>> {
     let style = Style::default().fg(Color::Cyan);
     let inner_w = width.saturating_sub(4);
-    let cmd = fit_to_width(&block.command, inner_w);
+    let cmd = fit_to_width(command, inner_w);
 
     vec![
         box_border('┌', '─', '┐', width, style),

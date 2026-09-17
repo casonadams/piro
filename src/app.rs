@@ -77,11 +77,6 @@ pub enum CommandStatus {
 }
 
 #[derive(Debug, Clone)]
-pub struct UserInputBlock {
-    pub command: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct CommandOutputBlock {
     pub command: String,
     pub status: CommandStatus,
@@ -92,7 +87,7 @@ pub struct CommandOutputBlock {
 
 #[derive(Debug, Clone)]
 pub enum FeedItem {
-    UserInput(UserInputBlock),
+    UserInput(String),
     CommandOutput(CommandOutputBlock),
 }
 
@@ -176,9 +171,7 @@ impl App {
     }
 
     pub fn add_command(&mut self, command: String, handle: AbortHandle) {
-        self.feed.push(FeedItem::UserInput(UserInputBlock {
-            command: command.clone(),
-        }));
+        self.feed.push(FeedItem::UserInput(command.clone()));
         self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
             command,
             status: CommandStatus::Running,
