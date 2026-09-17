@@ -1,8 +1,154 @@
+use unicode_width::UnicodeWidthChar;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputIntent {
     DirectCommand(String),
     CommandWithAgent(String),
     AgentPrompt(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualCoords {
+    pub col: usize,
+    pub row: usize,
+    pub width: usize,
+}
+
+struct CoordFinder {
+    target: VisualCoords,
+    row: usize,
+    col: usize,
+    best_char_idx: usize,
+}
+
+impl CoordFinder {
+    fn new(target: VisualCoords) -> Self {
+        Self {
+            target,
+            row: 0,
+            col: 0,
+            best_char_idx: 0,
+        }
+    }
+
+    fn step_char(&mut self, idx: usize, c: char) -> bool {
+        if c == '\n' {
+            if self.row == self.target.row {
+                self.best_char_idx = idx;
+                return true;
+            }
+            self.row += 1;
+            self.col = 0;
+            return false;
+        }
+
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        let target_w = self.target.width.max(1);
+        if self.col > 0 && self.col + cw > target_w {
+            if self.row == self.target.row {
+                return true;
+            }
+            self.row += 1;
+            self.col = 0;
+        }
+
+        if self.row == self.target.row {
+            self.best_char_idx = idx;
+            if self.col + cw > self.target.col {
+                return true;
+            }
+        }
+        self.col += cw;
+        false
+    }
+
+    fn finish(self, text_len: usize) -> usize {
+        if self.row == self.target.row && self.target.col >= self.col {
+            return text_len;
+        }
+        self.best_char_idx
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrappedInput {
+    pub lines: Vec<String>,
+    pub col: usize,
+    pub row: usize,
+}
+
+struct WrapBuilder {
+    lines: Vec<String>,
+    row: usize,
+    col: usize,
+    cursor_pos: Option<(usize, usize)>,
+    target_width: usize,
+    cursor: usize,
+}
+
+impl WrapBuilder {
+    fn new(cursor: usize, width: usize) -> Self {
+        Self {
+            lines: vec![String::new()],
+            row: 0,
+            col: 0,
+            cursor_pos: None,
+            target_width: width.max(1),
+            cursor,
+        }
+    }
+
+    fn push_newline(&mut self, idx: usize) {
+        if idx == self.cursor {
+            self.cursor_pos = Some((self.col, self.row));
+        }
+        self.lines.push(String::new());
+        self.row += 1;
+        self.col = 0;
+    }
+
+    fn push_char(&mut self, idx: usize, c: char) {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if self.col > 0 && self.col + cw > self.target_width {
+            self.lines.push(String::new());
+            self.row += 1;
+            self.col = 0;
+        }
+        if idx == self.cursor {
+            self.cursor_pos = Some((self.col, self.row));
+        }
+        self.lines[self.row].push(c);
+        self.col += cw;
+    }
+
+    fn finish(mut self, text_len: usize) -> WrappedInput {
+        if self.cursor >= text_len {
+            if self.col >= self.target_width {
+                self.lines.push(String::new());
+                self.row += 1;
+                self.col = 0;
+            }
+            self.cursor_pos = Some((self.col, self.row));
+        }
+        let (col, row) = self.cursor_pos.unwrap_or((self.col, self.row));
+        WrappedInput {
+            lines: self.lines,
+            col,
+            row,
+        }
+    }
+}
+
+pub fn wrap_input_text(text: &str, cursor: usize, width: usize) -> WrappedInput {
+    let mut builder = WrapBuilder::new(cursor, width);
+    for (idx, c) in text.chars().enumerate() {
+        if c == '\n' {
+            builder.push_newline(idx);
+        } else {
+            builder.push_char(idx, c);
+        }
+    }
+    builder.finish(text.chars().count())
 }
 
 pub fn parse_input_intent(input: &str) -> Option<InputIntent> {
@@ -35,56 +181,74 @@ impl InputState {
         &self.value
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    #[cfg(test)]
     pub fn line_count(&self) -> usize {
-        self.value.split('\n').count()
+        self.visual_line_count(usize::MAX)
     }
 
+    #[cfg(test)]
     pub fn cursor_coords(&self) -> (usize, usize) {
-        let mut row = 0;
-        let mut col = 0;
-        for (idx, c) in self.value.chars().enumerate() {
-            if idx == self.cursor {
-                return (col, row);
-            }
-            if c == '\n' {
-                row += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-        }
-        (col, row)
+        self.visual_coords(usize::MAX)
     }
 
-    pub fn move_up(&mut self) -> bool {
-        let (cur_col, cur_row) = self.cursor_coords();
+    pub fn visual_line_count(&self, width: usize) -> usize {
+        wrap_input_text(&self.value, self.cursor, width).lines.len()
+    }
+
+    pub fn visual_coords(&self, width: usize) -> (usize, usize) {
+        let wrapped = wrap_input_text(&self.value, self.cursor, width);
+        (wrapped.col, wrapped.row)
+    }
+
+    pub fn move_visual_up(&mut self, width: usize) -> bool {
+        let (cur_col, cur_row) = self.visual_coords(width);
         if cur_row == 0 {
             return false;
         }
-        self.cursor = self.char_idx_for_coords(cur_col, cur_row - 1);
+        self.cursor = self.char_idx_for_visual_coords(VisualCoords {
+            col: cur_col,
+            row: cur_row - 1,
+            width,
+        });
         true
     }
 
-    pub fn move_down(&mut self) -> bool {
-        let (cur_col, cur_row) = self.cursor_coords();
-        let total_lines = self.line_count();
+    pub fn move_visual_down(&mut self, width: usize) -> bool {
+        let (cur_col, cur_row) = self.visual_coords(width);
+        let total_lines = self.visual_line_count(width);
         if cur_row + 1 >= total_lines {
             return false;
         }
-        self.cursor = self.char_idx_for_coords(cur_col, cur_row + 1);
+        self.cursor = self.char_idx_for_visual_coords(VisualCoords {
+            col: cur_col,
+            row: cur_row + 1,
+            width,
+        });
         true
     }
 
-    fn char_idx_for_coords(&self, col: usize, target_row: usize) -> usize {
-        let mut char_idx = 0;
-        for (row, line) in self.value.split('\n').enumerate() {
-            let line_len = line.chars().count();
-            if row == target_row {
-                return char_idx + col.min(line_len);
+    #[cfg(test)]
+    pub fn move_up(&mut self) -> bool {
+        self.move_visual_up(usize::MAX)
+    }
+
+    #[cfg(test)]
+    pub fn move_down(&mut self) -> bool {
+        self.move_visual_down(usize::MAX)
+    }
+
+    fn char_idx_for_visual_coords(&self, target: VisualCoords) -> usize {
+        let mut finder = CoordFinder::new(target);
+        for (idx, c) in self.value.chars().enumerate() {
+            if finder.step_char(idx, c) {
+                return finder.best_char_idx;
             }
-            char_idx += line_len + 1;
         }
-        self.value.chars().count()
+        finder.finish(self.value.chars().count())
     }
 
     fn byte_idx(&self) -> usize {
@@ -203,16 +367,57 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_input_text_non_word_boundary() {
+        // AC-001 & AC-002: wraps at exact column boundary without breaking at words
+        let wrapped = wrap_input_text("1234567890abcdef", 12, 10);
+        assert_eq!(wrapped.lines, vec!["1234567890", "abcdef"]);
+        assert_eq!(wrapped.col, 2);
+        assert_eq!(wrapped.row, 1);
+
+        // Empty string
+        let empty = wrap_input_text("", 0, 10);
+        assert_eq!(empty.lines, vec![""]);
+        assert_eq!(empty.col, 0);
+        assert_eq!(empty.row, 0);
+
+        // Cursor at boundary of exactly full line
+        let full = wrap_input_text("1234567890", 10, 10);
+        assert_eq!(full.lines, vec!["1234567890", ""]);
+        assert_eq!(full.col, 0);
+        assert_eq!(full.row, 1);
+
+        // Cursor in the middle of full line
+        let mid = wrap_input_text("1234567890", 5, 10);
+        assert_eq!(mid.lines, vec!["1234567890"]);
+        assert_eq!(mid.col, 5);
+        assert_eq!(mid.row, 0);
+
+        // Explicit newlines combined with wrapping
+        let mixed = wrap_input_text("12345\n1234567890abcdef", 18, 10);
+        assert_eq!(mixed.lines, vec!["12345", "1234567890", "abcdef"]);
+        assert_eq!(mixed.col, 2);
+        assert_eq!(mixed.row, 2);
+
+        // Wide characters (CJK)
+        let wide = wrap_input_text("1234界", 5, 5);
+        assert_eq!(wide.lines, vec!["1234", "界"]);
+        assert_eq!(wide.col, 2);
+        assert_eq!(wide.row, 1);
+    }
+
+    #[test]
     fn test_input_cursor_coords() {
         let mut input = InputState::default();
         assert_eq!(input.line_count(), 1);
         assert_eq!(input.cursor_coords(), (0, 0));
 
         input.set_value("first\nsecond\nthird".into());
+        assert_eq!(input.cursor(), 18);
         assert_eq!(input.line_count(), 3);
         assert_eq!(input.cursor_coords(), (5, 2));
 
         input.move_start();
+        assert_eq!(input.cursor(), 0);
         assert_eq!(input.cursor_coords(), (0, 0));
 
         for _ in 0..5 {
@@ -222,6 +427,42 @@ mod tests {
 
         input.move_right();
         assert_eq!(input.cursor_coords(), (0, 1));
+    }
+
+    #[test]
+    fn test_input_visual_vertical_movement_wrapped() {
+        let mut input = InputState::default();
+        // Width 10: "0123456789" (row 0), "abcdef" (row 1)
+        input.set_value("0123456789abcdef".into());
+        // Cursor starts at end: char 16, row 1, col 6
+        assert_eq!(input.visual_coords(10), (6, 1));
+        assert!(!input.move_visual_down(10));
+
+        // Move up from row 1, col 6 -> moves to row 0, col 6 (char '6' at index 6)
+        assert!(input.move_visual_up(10));
+        assert_eq!(input.visual_coords(10), (6, 0));
+        assert_eq!(input.cursor(), 6);
+
+        // Cannot move up further
+        assert!(!input.move_visual_up(10));
+
+        // Move down back to row 1, col 6
+        assert!(input.move_visual_down(10));
+        assert_eq!(input.visual_coords(10), (6, 1));
+        assert_eq!(input.cursor(), 16);
+
+        // Position on row 1 at col 2 ('c', char 12)
+        input.move_start();
+        for _ in 0..12 {
+            input.move_right();
+        }
+        assert_eq!(input.visual_coords(10), (2, 1));
+        assert_eq!(input.cursor(), 12);
+
+        // Move up to row 0, col 2 ('2', char 2)
+        assert!(input.move_visual_up(10));
+        assert_eq!(input.visual_coords(10), (2, 0));
+        assert_eq!(input.cursor(), 2);
     }
 
     #[test]

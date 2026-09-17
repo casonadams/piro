@@ -31,6 +31,7 @@ fn dispatch_terminal_event(app: &mut App, input: TerminalInput, ch: &mut LoopCha
         CrosstermEvent::Key(key) => match app.mode {
             Mode::Input => {
                 let mut ctx = InputCtx {
+                    width: input.width,
                     runner_tx: ch.runner_tx,
                     runner_rx: ch.runner_rx,
                     agent_tx: ch.agent_tx,

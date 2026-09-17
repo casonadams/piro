@@ -7,6 +7,7 @@ use crate::sys::{RunnerMsg, copy, spawn_command};
 use crate::ui;
 
 pub struct InputCtx<'a> {
+    pub width: usize,
     pub runner_tx: &'a mpsc::UnboundedSender<RunnerMsg>,
     pub runner_rx: &'a mut mpsc::UnboundedReceiver<RunnerMsg>,
     pub agent_tx: &'a mpsc::UnboundedSender<AgentEvent>,
@@ -121,12 +122,12 @@ fn handle_input_plain(app: &mut App, code: KeyCode, ctx: &mut InputCtx) {
             }
         }
         KeyCode::Up => {
-            if !app.input.move_up() {
+            if !app.input.move_visual_up(ctx.width) {
                 app.history_prev();
             }
         }
         KeyCode::Down => {
-            if !app.input.move_down() {
+            if !app.input.move_visual_down(ctx.width) {
                 app.history_next();
             }
         }
@@ -321,6 +322,7 @@ mod tests {
         let (runner_tx, mut runner_rx) = mpsc::unbounded_channel();
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
         let mut ctx = InputCtx {
+            width: 80,
             runner_tx: &runner_tx,
             runner_rx: &mut runner_rx,
             agent_tx: &agent_tx,
@@ -342,5 +344,31 @@ mod tests {
         // Down moves back to line 1
         handle_input_key(&mut app, make_key(KeyCode::Down, KeyModifiers::NONE), &mut ctx);
         assert_eq!(app.input.cursor_coords(), (1, 1));
+    }
+
+    #[test]
+    fn test_arrow_navigation_across_wrapped_visual_lines() {
+        let mut app = App::default();
+        let (runner_tx, mut runner_rx) = mpsc::unbounded_channel();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let mut ctx = InputCtx {
+            width: 10,
+            runner_tx: &runner_tx,
+            runner_rx: &mut runner_rx,
+            agent_tx: &agent_tx,
+            agent_rx: &mut agent_rx,
+        };
+
+        // 16 chars: "0123456789" (row 0), "abcdef" (row 1)
+        app.input.set_value("0123456789abcdef".into());
+        assert_eq!(app.input.visual_coords(ctx.width), (6, 1));
+
+        // Up arrow moves from row 1, col 6 to row 0, col 6
+        handle_input_key(&mut app, make_key(KeyCode::Up, KeyModifiers::NONE), &mut ctx);
+        assert_eq!(app.input.visual_coords(ctx.width), (6, 0));
+
+        // Down arrow moves back to row 1, col 6
+        handle_input_key(&mut app, make_key(KeyCode::Down, KeyModifiers::NONE), &mut ctx);
+        assert_eq!(app.input.visual_coords(ctx.width), (6, 1));
     }
 }
