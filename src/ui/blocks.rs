@@ -7,40 +7,51 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{CommandOutputBlock, CommandStatus};
 
+pub struct FormattedLine {
+    pub line: Line<'static>,
+    pub is_continuation: bool,
+}
+
 fn box_border(left: char, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
-    let box_w = width.saturating_sub(2);
-    let inner = fill.to_string().repeat(box_w.saturating_sub(2));
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled(format!("{}{}{}", left, inner, right), style),
-        Span::raw(" "),
-    ])
+    let inner = fill.to_string().repeat(width.saturating_sub(2));
+    Line::from(vec![Span::styled(format!("{}{}{}", left, inner, right), style)])
 }
 
 fn box_line(spans: Vec<Span<'static>>, border_style: Style) -> Line<'static> {
-    let mut line_spans = vec![Span::raw(" "), Span::styled("│ ", border_style)];
+    let mut line_spans = vec![Span::styled("│ ", border_style)];
     line_spans.extend(spans);
     line_spans.push(Span::styled(" │", border_style));
-    line_spans.push(Span::raw(" "));
     Line::from(line_spans)
 }
 
-pub fn render_user_input_block(command: &str, width: usize) -> Vec<Line<'static>> {
+pub fn render_user_input_block(command: &str, width: usize) -> Vec<FormattedLine> {
     let style = Style::default().fg(Color::Cyan);
-    let inner_w = width.saturating_sub(6);
+    let inner_w = width.saturating_sub(4);
 
     let mut lines = Vec::new();
-    lines.push(box_border('┌', '─', '┐', width, style));
+    lines.push(FormattedLine {
+        line: box_border('┌', '─', '┐', width, style),
+        is_continuation: false,
+    });
 
-    for wrapped in wrap_text_to_spans(command, inner_w, Style::default().fg(Color::White)) {
-        lines.push(box_line(wrapped, style));
+    for (idx, wrapped) in wrap_text_to_spans(command, inner_w, Style::default().fg(Color::White))
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(FormattedLine {
+            line: box_line(wrapped, style),
+            is_continuation: idx > 0,
+        });
     }
 
-    lines.push(box_border('└', '─', '┘', width, style));
+    lines.push(FormattedLine {
+        line: box_border('└', '─', '┘', width, style),
+        is_continuation: false,
+    });
     lines
 }
 
-pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<Line<'static>> {
+pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
     let color = match block.status {
         CommandStatus::Running => Color::Yellow,
         CommandStatus::Success(_) => Color::Green,
@@ -49,65 +60,95 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
     };
     let border = Style::default().fg(color);
     let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
-    let inner_w = width.saturating_sub(6);
+    let inner_w = width.saturating_sub(4);
     let empty_line = " ".repeat(inner_w);
 
     let mut lines = Vec::new();
-    lines.push(box_border('┌', '─', '┐', width, border));
+    lines.push(FormattedLine {
+        line: box_border('┌', '─', '┐', width, border),
+        is_continuation: false,
+    });
 
     // Command line (word-wrapped if long)
     let cmd_raw = format!("$ {}", block.command);
-    for wrapped in wrap_text_to_spans(
+    for (idx, wrapped) in wrap_text_to_spans(
         &cmd_raw,
         inner_w,
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    ) {
-        lines.push(box_line(wrapped, border));
+    )
+    .into_iter()
+    .enumerate()
+    {
+        lines.push(FormattedLine {
+            line: box_line(wrapped, border),
+            is_continuation: idx > 0,
+        });
     }
 
     // Spacer
-    lines.push(box_line(vec![Span::raw(empty_line.clone())], border));
+    lines.push(FormattedLine {
+        line: box_line(vec![Span::raw(empty_line.clone())], border),
+        is_continuation: false,
+    });
 
     // Output body with word-boundary wrapping and ANSI color parsing
     if block.lines.is_empty() {
-        lines.push(box_line(
-            vec![Span::styled(fit_to_width("(no output)", inner_w), dim)],
-            border,
-        ));
+        lines.push(FormattedLine {
+            line: box_line(vec![Span::styled(fit_to_width("(no output)", inner_w), dim)], border),
+            is_continuation: false,
+        });
     } else {
         for l in &block.lines {
-            for wrapped in parse_and_wrap_ansi_line(l, inner_w) {
-                lines.push(box_line(wrapped, border));
+            for (idx, wrapped) in parse_and_wrap_ansi_line(l, inner_w).into_iter().enumerate() {
+                lines.push(FormattedLine {
+                    line: box_line(wrapped, border),
+                    is_continuation: idx > 0,
+                });
             }
         }
     }
 
     // Spacer
-    lines.push(box_line(vec![Span::raw(empty_line.clone())], border));
+    lines.push(FormattedLine {
+        line: box_line(vec![Span::raw(empty_line.clone())], border),
+        is_continuation: false,
+    });
 
     // Failure / Cancel message
     match block.status {
         CommandStatus::Failed(code) => {
             let msg = format!("Command exited with code {}", code);
-            lines.push(box_line(
-                vec![Span::styled(
-                    fit_to_width(&msg, inner_w),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                )],
-                border,
-            ));
-            lines.push(box_line(vec![Span::raw(empty_line)], border));
+            lines.push(FormattedLine {
+                line: box_line(
+                    vec![Span::styled(
+                        fit_to_width(&msg, inner_w),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )],
+                    border,
+                ),
+                is_continuation: false,
+            });
+            lines.push(FormattedLine {
+                line: box_line(vec![Span::raw(empty_line)], border),
+                is_continuation: false,
+            });
         }
         CommandStatus::Cancelled => {
             let msg = "Command cancelled";
-            lines.push(box_line(
-                vec![Span::styled(
-                    fit_to_width(msg, inner_w),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                )],
-                border,
-            ));
-            lines.push(box_line(vec![Span::raw(empty_line)], border));
+            lines.push(FormattedLine {
+                line: box_line(
+                    vec![Span::styled(
+                        fit_to_width(msg, inner_w),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    )],
+                    border,
+                ),
+                is_continuation: false,
+            });
+            lines.push(FormattedLine {
+                line: box_line(vec![Span::raw(empty_line)], border),
+                is_continuation: false,
+            });
         }
         _ => {}
     }
@@ -118,12 +159,15 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
         CommandStatus::Running => format!("Running {:.1}s", dur.as_secs_f64()),
         _ => format!("Took {:.1}s", dur.as_secs_f64()),
     };
-    lines.push(box_line(
-        vec![Span::styled(fit_to_width(&status_str, inner_w), dim)],
-        border,
-    ));
+    lines.push(FormattedLine {
+        line: box_line(vec![Span::styled(fit_to_width(&status_str, inner_w), dim)], border),
+        is_continuation: false,
+    });
 
-    lines.push(box_border('└', '─', '┘', width, border));
+    lines.push(FormattedLine {
+        line: box_border('└', '─', '┘', width, border),
+        is_continuation: false,
+    });
     lines
 }
 
@@ -292,7 +336,6 @@ mod tests {
         let wrapped = parse_and_wrap_ansi_line(raw, 16);
         assert!(wrapped.len() > 1);
 
-        // Verify each line has width exactly 16
         for line in &wrapped {
             let line_w: usize = line
                 .iter()
@@ -306,7 +349,6 @@ mod tests {
             assert_eq!(line_w, 16);
         }
 
-        // Verify word "quick" is intact
         assert_eq!(wrapped[0][0].content, "The");
         assert_eq!(wrapped[0][2].content, "quick");
     }

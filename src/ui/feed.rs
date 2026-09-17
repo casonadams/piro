@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use super::blocks::{render_command_output_block, render_user_input_block};
+use super::blocks::{FormattedLine, render_command_output_block, render_user_input_block};
 use crate::app::{App, FeedItem, Mode, SelectionType};
 
 pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -27,18 +27,26 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let mut lines = Vec::new();
+    let mut formatted_lines: Vec<FormattedLine> = Vec::new();
     for item in &app.feed {
         match item {
-            FeedItem::UserInput(cmd) => lines.extend(render_user_input_block(cmd, width)),
-            FeedItem::CommandOutput(b) => lines.extend(render_command_output_block(b, width)),
+            FeedItem::UserInput(cmd) => formatted_lines.extend(render_user_input_block(cmd, width)),
+            FeedItem::CommandOutput(b) => formatted_lines.extend(render_command_output_block(b, width)),
         }
-        lines.push(Line::from(""));
+        formatted_lines.push(FormattedLine {
+            line: Line::from(""),
+            is_continuation: false,
+        });
     }
 
-    app.total_feed_lines = lines.len();
-    let (start, end) = app.scroll.visible_range(lines.len(), view_h);
-    let mut visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(end - start).collect();
+    app.total_feed_lines = formatted_lines.len();
+    let (start, end) = app.scroll.visible_range(formatted_lines.len(), view_h);
+    let mut visible: Vec<Line<'static>> = formatted_lines
+        .into_iter()
+        .skip(start)
+        .take(end - start)
+        .map(|fl| fl.line)
+        .collect();
 
     let count = visible.len();
     let pad = if count < view_h && app.scroll.auto_scroll {
@@ -106,28 +114,33 @@ fn apply_doc_selection(buf: &mut Buffer, app: &App, start_line: usize, pad: usiz
 }
 
 pub fn extract_selected_text(app: &App, width: usize) -> String {
-    let mut all_lines = Vec::new();
+    let mut all_formatted = Vec::new();
     for item in &app.feed {
         match item {
-            FeedItem::UserInput(cmd) => all_lines.extend(render_user_input_block(cmd, width)),
-            FeedItem::CommandOutput(b) => all_lines.extend(render_command_output_block(b, width)),
+            FeedItem::UserInput(cmd) => all_formatted.extend(render_user_input_block(cmd, width)),
+            FeedItem::CommandOutput(b) => all_formatted.extend(render_command_output_block(b, width)),
         }
-        all_lines.push(Line::from(""));
+        all_formatted.push(FormattedLine {
+            line: Line::from(""),
+            is_continuation: false,
+        });
     }
 
     let (sel_start, sel_end) = app.normalized_selection().unwrap_or((app.cursor, app.cursor));
-    let start_idx = sel_start.line.min(all_lines.len());
-    let end_limit = (sel_end.line + 1).min(all_lines.len());
+    let start_idx = sel_start.line.min(all_formatted.len());
+    let end_limit = (sel_end.line + 1).min(all_formatted.len());
 
-    let mut result = Vec::new();
+    let mut out = String::new();
     if start_idx < end_limit {
-        for line in &all_lines[start_idx..end_limit] {
-            let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        for (offset, item) in all_formatted[start_idx..end_limit].iter().enumerate() {
+            let line_idx = start_idx + offset;
+            let raw: String = item.line.spans.iter().map(|s| s.content.as_ref()).collect();
             let cleaned = clean_scraped_line(&raw);
             if cleaned.is_empty() {
                 continue;
             }
 
+            // Apply column bounds for single-line character selection
             let snippet = if app.selection_type == SelectionType::Char && sel_start.line == sel_end.line {
                 let start_col = (sel_start.col.min(sel_end.col) as usize).saturating_sub(2);
                 let end_col = (sel_start.col.max(sel_end.col) as usize).saturating_sub(2);
@@ -141,13 +154,26 @@ pub fn extract_selected_text(app: &App, width: usize) -> String {
                 cleaned
             };
 
-            if !snippet.is_empty() {
-                result.push(snippet);
+            if snippet.is_empty() {
+                continue;
+            }
+
+            // If this is a soft-wrapped continuation of the same logical line, unwrap without a hard newline!
+            if item.is_continuation && line_idx > start_idx {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(&snippet);
+            } else {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&snippet);
             }
         }
     }
 
-    result.join("\n")
+    out
 }
 
 fn clean_scraped_line(raw: &str) -> String {
@@ -161,5 +187,53 @@ fn clean_scraped_line(raw: &str) -> String {
         String::new()
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{CommandOutputBlock, CommandStatus, DocPos};
+    use std::time::Instant;
+
+    #[test]
+    fn test_extract_wrapped_line_without_soft_breaks() {
+        let mut app = App::new();
+        let long_line = "This is a very long line that will definitely exceed the forty character limit and should wrap cleanly without soft line breaks";
+        app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
+            command: "echo test".into(),
+            status: CommandStatus::Success(0),
+            lines: vec![long_line.into()],
+            started_at: Instant::now(),
+            duration: None,
+        }));
+
+        // Total width 30: long_line wraps to ~4 visual lines
+        let width = 30;
+        let mut formatted = Vec::new();
+        for item in &app.feed {
+            if let FeedItem::CommandOutput(b) = item {
+                formatted.extend(render_command_output_block(b, width));
+            }
+        }
+
+        // Verify it wrapped to multiple visual lines
+        let continuation_count = formatted.iter().filter(|f| f.is_continuation).count();
+        assert!(continuation_count > 0, "must wrap to multiple lines at width 30");
+
+        // Select all lines of the feed
+        app.total_feed_lines = formatted.len() + 1;
+        app.enter_scroll_mode();
+        app.selection_type = SelectionType::Line;
+        app.selection_anchor = Some(DocPos { line: 0, col: 0 });
+        app.cursor.line = formatted.len();
+
+        let extracted = extract_selected_text(&app, width);
+
+        // Verify the extracted string does NOT have soft-wrap breaks inside the long line
+        assert!(
+            extracted.contains(long_line),
+            "extracted text must contain unbroken long line: {extracted:?}"
+        );
     }
 }

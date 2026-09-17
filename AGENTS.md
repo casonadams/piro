@@ -120,8 +120,10 @@ The application provides two operational modes:
    - When scrolled up into history, the scroll offset notice is displayed in the **footer** next to `READY` (e.g. ` READY   Scrollback active: 4 lines up (PgDn / End to return)`).
    - Never draw scroll indicator text into the input area's divider rules.
 4. **Command Output Blocks**:
-   - Blocks extend to full edge with **1 space of padding on both left and right sides** (column 0 and column `width - 1` are blank space).
-   - Long output lines and commands are **word-wrapped at word boundaries** (preserving full ANSI colors across wrapped lines without splitting words).
+   - Block edges (`┌`, `│`, `└` and `┐`, `│`, `┘`) extend **all the way to the screen edges** (columns 0 and `width - 1`).
+   - Content has **1 space of padding inside the block borders** (`│ ` on left, ` │` on right).
+   - Long output lines and commands are **word-wrapped at word boundaries** on screen, preserving full ANSI colors.
+   - **Soft-Wrap Unwrapping**: When copying text, soft-wrapped continuation rows are automatically rejoined with space instead of newline, guaranteeing that long lines copy cleanly without artificial line breaks.
    - `$ <command>` is placed on the first row inside the block in bold white.
    - A blank spacer row follows the command line.
    - Output lines preserve terminal ANSI color codes parsed via `ansi-to-tui` into colored Ratatui Spans without border misalignment.
@@ -130,7 +132,7 @@ The application provides two operational modes:
    - If a command is cancelled via `Ctrl+C`, `Command cancelled` is displayed in bold yellow followed by a blank spacer row.
    - The final line displays `Took X.Xs` (or `Running X.Xs` while active) in dimmed text with 1-decimal-place precision (`{:.1}s`).
 5. **Border Alignment & Padding**:
-   - All block lines must be formatted using `fit_to_width` and exact inner width math to prevent right border clipping on terminal emulators. Column 0 and column `width - 1` are reserved as 1-cell margins.
+   - All block lines are formatted using exact `inner_w = width - 4` math so left border `│` sits at column 0 and right border `│` sits at column `width - 1`.
 
 ## Development Workflows & Quality Gates
 
