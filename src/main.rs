@@ -30,19 +30,13 @@ async fn main() -> std::io::Result<()> {
         })?;
 
         tokio::select! {
-            _ = ticker.tick() => {}
-            Some(msg) = runner_rx.recv() => {
-                match msg {
-                    RunnerMsg::Line(line) => app.append_output_line(line),
-                    RunnerMsg::Done(code, dur) => app.complete_command(code, dur),
-                }
-            }
+            biased;
             Some(Ok(event)) = reader.next() => {
                 match event {
                     CrosstermEvent::Key(key) => {
                         match app.mode {
-                            Mode::Input => handle_input_mode_key(&mut app, key, &runner_tx),
-                            Mode::Scroll => handle_scroll_mode_key(&mut app, key, term_width),
+                            Mode::Input => handle_input_mode_key(&mut app, key, &runner_tx, &mut runner_rx),
+                            Mode::Scroll => handle_scroll_mode_key(&mut app, key, term_width, &mut runner_rx),
                         }
                     }
                     CrosstermEvent::Mouse(mouse) => {
@@ -52,17 +46,35 @@ async fn main() -> std::io::Result<()> {
                     _ => {}
                 }
             }
+            Some(msg) = runner_rx.recv() => {
+                match msg {
+                    RunnerMsg::Line(line) => app.append_output_line(line),
+                    RunnerMsg::Done(code, dur) => app.complete_command(code, dur),
+                }
+            }
+            _ = ticker.tick() => {}
         }
     }
 
     Ok(())
 }
 
-fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_tx: &mpsc::UnboundedSender<RunnerMsg>) {
+fn cancel_and_drain(app: &mut App, runner_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>) {
+    if app.cancel_active() {
+        while runner_rx.try_recv().is_ok() {}
+    }
+}
+
+fn handle_input_mode_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    runner_tx: &mpsc::UnboundedSender<RunnerMsg>,
+    runner_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
+) {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
-                // Ctrl+C: clear user input
+                cancel_and_drain(app, runner_rx);
                 app.input.take_value();
                 return;
             }
@@ -113,6 +125,10 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
                 app.input.delete_to_end();
                 return;
             }
+            KeyCode::Char('o') => {
+                app.toggle_expand();
+                return;
+            }
             _ => {}
         }
     }
@@ -137,9 +153,8 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
 
     match key.code {
         KeyCode::Esc => {
-            // Esc: cancel running command if running, otherwise toggle scroll or clear
             if app.is_command_running() {
-                app.cancel_active();
+                cancel_and_drain(app, runner_rx);
             } else if app.input.value().is_empty() {
                 app.enter_scroll_mode();
             } else {
@@ -175,16 +190,22 @@ fn handle_input_mode_key(app: &mut App, key: crossterm::event::KeyEvent, runner_
     }
 }
 
-fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_width: usize) {
+fn handle_scroll_mode_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    term_width: usize,
+    runner_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
+) {
     let max_col = term_width.saturating_sub(1) as u16;
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
+                if app.is_command_running() {
+                    cancel_and_drain(app, runner_rx);
+                }
                 if app.selection_anchor.is_some() {
                     app.clear_selection();
-                } else if app.is_command_running() {
-                    app.cancel_active();
                 } else {
                     app.exit_scroll_mode();
                 }
@@ -213,6 +234,10 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
                 clipboard::copy_to_clipboard(&text);
                 app.copied_flash = true;
             }
+        }
+        // Toggle expand / collapse
+        KeyCode::Char('o') => {
+            app.toggle_expand();
         }
         // 'y': yank and KEEP cursor where it is!
         KeyCode::Char('y') => {
@@ -251,10 +276,10 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
         }
         // 'Esc': cancel running command if running, or clear selection, or drop out
         KeyCode::Esc => {
-            if app.selection_anchor.is_some() {
+            if app.is_command_running() {
+                cancel_and_drain(app, runner_rx);
+            } else if app.selection_anchor.is_some() {
                 app.clear_selection();
-            } else if app.is_command_running() {
-                app.cancel_active();
             } else {
                 app.exit_scroll_mode();
             }
@@ -291,11 +316,8 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, term_w
             app.move_cursor_up(2);
         }
         MouseEventKind::ScrollDown => {
-            if app.mode == Mode::Scroll {
-                let past_bottom = app.move_cursor_down(2);
-                if past_bottom {
-                    app.exit_scroll_mode();
-                }
+            if app.mode == Mode::Scroll && app.move_cursor_down(2) {
+                app.exit_scroll_mode();
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {

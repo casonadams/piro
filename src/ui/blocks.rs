@@ -91,19 +91,44 @@ pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> 
         is_continuation: false,
     });
 
-    // Output body with word-boundary wrapping and ANSI color parsing
+    // Output body with live tailing (collapsible via Ctrl+O)
     if block.lines.is_empty() {
         lines.push(FormattedLine {
             line: box_line(vec![Span::styled(fit_to_width("(no output)", inner_w), dim)], border),
             is_continuation: false,
         });
     } else {
-        for l in &block.lines {
-            for (idx, wrapped) in parse_and_wrap_ansi_line(l, inner_w).into_iter().enumerate() {
+        const TAIL_LIMIT: usize = 8;
+        if !block.expanded && block.lines.len() > TAIL_LIMIT {
+            let hidden = block.lines.len() - TAIL_LIMIT;
+            let hint = format!("... {} lines hidden (Ctrl+O to expand) ...", hidden);
+            lines.push(FormattedLine {
+                line: box_line(vec![Span::styled(fit_to_width(&hint, inner_w), dim)], border),
+                is_continuation: false,
+            });
+            for l in &block.lines[hidden..] {
+                for (idx, wrapped) in parse_and_wrap_ansi_line(l, inner_w).into_iter().enumerate() {
+                    lines.push(FormattedLine {
+                        line: box_line(wrapped, border),
+                        is_continuation: idx > 0,
+                    });
+                }
+            }
+        } else {
+            if block.expanded && block.lines.len() > TAIL_LIMIT {
+                let hint = "(Ctrl+O to collapse)";
                 lines.push(FormattedLine {
-                    line: box_line(wrapped, border),
-                    is_continuation: idx > 0,
+                    line: box_line(vec![Span::styled(fit_to_width(hint, inner_w), dim)], border),
+                    is_continuation: false,
                 });
+            }
+            for l in &block.lines {
+                for (idx, wrapped) in parse_and_wrap_ansi_line(l, inner_w).into_iter().enumerate() {
+                    lines.push(FormattedLine {
+                        line: box_line(wrapped, border),
+                        is_continuation: idx > 0,
+                    });
+                }
             }
         }
     }

@@ -206,6 +206,7 @@ mod tests {
             lines: vec![long_line.into()],
             started_at: Instant::now(),
             duration: None,
+            expanded: true,
         }));
 
         // Total width 30: long_line wraps to ~4 visual lines

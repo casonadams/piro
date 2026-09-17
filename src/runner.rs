@@ -12,7 +12,9 @@ pub enum RunnerMsg {
 }
 
 pub struct ProcessHandle {
-    abort: AbortHandle,
+    supervisor: AbortHandle,
+    out_abort: AbortHandle,
+    err_abort: AbortHandle,
     #[cfg(unix)]
     pid: Option<u32>,
 }
@@ -21,21 +23,30 @@ impl ProcessHandle {
     #[cfg(test)]
     pub fn mock(abort: AbortHandle) -> Self {
         Self {
-            abort,
+            supervisor: abort.clone(),
+            out_abort: abort.clone(),
+            err_abort: abort,
             #[cfg(unix)]
             pid: None,
         }
     }
 
     pub fn kill(&mut self) {
+        // Immediately abort the stdout and stderr stream readers
+        self.out_abort.abort();
+        self.err_abort.abort();
+
+        // Kill the child process and process group with SIGKILL
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             unsafe {
-                libc::kill(-(pid as i32), libc::SIGTERM);
-                libc::kill(-(pid as i32), libc::SIGKILL);
+                let p = pid as i32;
+                let _ = libc::kill(-p, libc::SIGKILL);
+                let _ = libc::kill(p, libc::SIGKILL);
             }
         }
-        self.abort.abort();
+
+        self.supervisor.abort();
     }
 }
 
@@ -45,6 +56,7 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
     let mut cmd = Command::new(shell);
     cmd.arg("-c")
         .arg(&cmd_str)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -52,7 +64,9 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
         .env("CLICOLOR_FORCE", "1")
         .env("FORCE_COLOR", "1")
         .env("COLORTERM", "truecolor")
-        .env("TERM", "xterm-256color");
+        .env("TERM", "xterm-256color")
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat");
 
     #[cfg(unix)]
     cmd.process_group(0);
@@ -62,8 +76,11 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
         Err(e) => {
             let _ = tx.send(RunnerMsg::Line(format!("Failed to spawn: {}", e)));
             let _ = tx.send(RunnerMsg::Done(Some(1), start.elapsed()));
+            let dummy = tokio::spawn(async {}).abort_handle();
             return ProcessHandle {
-                abort: tokio::spawn(async {}).abort_handle(),
+                supervisor: dummy.clone(),
+                out_abort: dummy.clone(),
+                err_abort: dummy,
                 #[cfg(unix)]
                 pid: None,
             };
@@ -75,32 +92,33 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let abort = tokio::spawn(async move {
-        let tx_out = tx.clone();
-        let tx_err = tx.clone();
-
-        let out_task = tokio::spawn(async move {
-            if let Some(out) = stdout {
-                let mut reader = BufReader::new(out).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    if tx_out.send(RunnerMsg::Line(line)).is_err() {
-                        break;
-                    }
+    let tx_out = tx.clone();
+    let out_task = tokio::spawn(async move {
+        if let Some(out) = stdout {
+            let mut reader = BufReader::new(out).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                if tx_out.send(RunnerMsg::Line(line)).is_err() {
+                    break;
                 }
             }
-        });
+        }
+    });
+    let out_abort = out_task.abort_handle();
 
-        let err_task = tokio::spawn(async move {
-            if let Some(err) = stderr {
-                let mut reader = BufReader::new(err).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    if tx_err.send(RunnerMsg::Line(line)).is_err() {
-                        break;
-                    }
+    let tx_err = tx.clone();
+    let err_task = tokio::spawn(async move {
+        if let Some(err) = stderr {
+            let mut reader = BufReader::new(err).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                if tx_err.send(RunnerMsg::Line(line)).is_err() {
+                    break;
                 }
             }
-        });
+        }
+    });
+    let err_abort = err_task.abort_handle();
 
+    let supervisor = tokio::spawn(async move {
         let status = child.wait().await;
         let _ = out_task.await;
         let _ = err_task.await;
@@ -110,7 +128,9 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
     .abort_handle();
 
     ProcessHandle {
-        abort,
+        supervisor,
+        out_abort,
+        err_abort,
         #[cfg(unix)]
         pid,
     }
@@ -147,7 +167,6 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut handle = spawn_command("sleep 30".into(), tx);
 
-        // Sleep 50ms then kill immediately
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.kill();
     }

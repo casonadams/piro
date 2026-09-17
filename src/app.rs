@@ -188,6 +188,7 @@ pub struct CommandOutputBlock {
     pub lines: Vec<String>,
     pub started_at: Instant,
     pub duration: Option<Duration>,
+    pub expanded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +353,7 @@ impl App {
             lines: Vec::new(),
             started_at: Instant::now(),
             duration: None,
+            expanded: false,
         }));
         self.active_process = Some(handle);
         self.scroll.scroll_from_bottom = 0;
@@ -359,6 +361,9 @@ impl App {
     }
 
     pub fn append_output_line(&mut self, line: String) {
+        if !self.is_command_running() {
+            return;
+        }
         if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
             if b.lines.len() >= 5000 {
                 b.lines.remove(0);
@@ -368,6 +373,9 @@ impl App {
     }
 
     pub fn complete_command(&mut self, exit_code: Option<i32>, duration: Duration) {
+        if !self.is_command_running() {
+            return;
+        }
         self.active_process = None;
         if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
             b.duration = Some(duration);
@@ -493,6 +501,15 @@ impl App {
             FeedItem::CommandOutput(cmd) if !cmd.lines.is_empty() => Some(cmd.lines.join("\n")),
             _ => None,
         })
+    }
+
+    pub fn toggle_expand(&mut self) {
+        for item in self.feed.iter_mut().rev() {
+            if let FeedItem::CommandOutput(b) = item {
+                b.expanded = !b.expanded;
+                break;
+            }
+        }
     }
 
     pub fn screen_coords_to_doc_pos(&self, col: u16, row: u16) -> Option<DocPos> {

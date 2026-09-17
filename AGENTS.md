@@ -114,6 +114,7 @@ The application provides two operational modes:
        - **Yank / Copy (`y` / `Enter`)**: Copies selected text to the system clipboard (OSC 52 and macOS `pbcopy`), immediately clears the highlight, and returns to the input prompt.
        - **Cancel (`Esc`)**: Clears the selection (or exits scroll mode if not selecting).
      - **One-Key Block Copy (`b`)**: Pressing `b` in Scroll Mode instantly copies the entire output of the current command block.
+     - **Expand / Collapse (`o` / `Ctrl+O`)**: Toggles between the compact 8-line live tail and the fully expanded command output block.
    - Footer displays:
      - Default: ` SCROLL   [hjkl] Move  [v] Char sel  [V] Line sel  [b] Copy block  [i/q/Esc] Return `
      - When Selecting (Char): ` VISUAL   [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
@@ -134,6 +135,7 @@ The application provides two operational modes:
 4. **Command Output Blocks**:
    - Block edges (`┌`, `│`, `└` and `┐`, `│`, `┘`) extend **all the way to the screen edges** (columns 0 and `width - 1`).
    - Content has **1 space of padding inside the block borders** (`│ ` on left, ` │` on right).
+   - **Live Tailing (pi.dev-style)**: By default, blocks display a compact live tail of the last 8 lines with `... N lines hidden (Ctrl+O to expand) ...`. Pressing `Ctrl+O` (or `o` in Scroll Mode) expands to the full output.
    - Long output lines and commands are **word-wrapped at word boundaries** on screen, preserving full ANSI colors.
    - **Soft-Wrap Unwrapping**: When copying text, soft-wrapped continuation rows are automatically rejoined with space instead of newline, guaranteeing that long lines copy cleanly without artificial line breaks.
    - `$ <command>` is placed on the first row inside the block in bold white.
