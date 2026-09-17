@@ -95,11 +95,9 @@ impl<P: LlmProvider> AgentBackend for ProviderBackend<P> {
             });
         }
 
-        if let Some(content) = resp.content {
-            return Ok(StepResult::FinalAnswer(content));
-        }
-
-        Ok(StepResult::FinalAnswer("Done.".to_string()))
+        Ok(StepResult::FinalAnswer(
+            resp.content.unwrap_or_else(|| "Done.".to_string()),
+        ))
     }
 }
 
@@ -135,44 +133,31 @@ pub fn parse_model_spec(spec: &str) -> ModelSpec<'_> {
 }
 
 fn resolve_provider_config(provider: &str, model: &str) -> Result<OpenAiConfig, String> {
-    match provider {
+    let (base_url, key_var) = match provider {
         "ollama" => {
             let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".into());
-            Ok(OpenAiConfig {
-                base_url: format!("{}/v1", host.trim_end_matches('/')),
-                model: model.into(),
-                api_key: None,
-            })
+            (format!("{}/v1", host.trim_end_matches('/')), None)
         }
-        "openai" => {
-            let key = std::env::var("OPENAI_API_KEY").ok();
-            let base_url = std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
-            Ok(OpenAiConfig {
-                base_url,
-                model: model.into(),
-                api_key: key,
-            })
+        "openai" => (
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+            Some("OPENAI_API_KEY"),
+        ),
+        "openrouter" => ("https://openrouter.ai/api/v1".into(), Some("OPENROUTER_API_KEY")),
+        "deepseek" => ("https://api.deepseek.com/v1".into(), Some("DEEPSEEK_API_KEY")),
+        "groq" => ("https://api.groq.com/openai/v1".into(), Some("GROQ_API_KEY")),
+        unsupported => {
+            return Err(format!(
+                "Unsupported provider '{}'. Supported providers: 'ollama', 'openai', 'openrouter', 'deepseek', 'groq'",
+                unsupported
+            ));
         }
-        "openrouter" => Ok(OpenAiConfig {
-            base_url: "https://openrouter.ai/api/v1".into(),
-            model: model.into(),
-            api_key: std::env::var("OPENROUTER_API_KEY").ok(),
-        }),
-        "deepseek" => Ok(OpenAiConfig {
-            base_url: "https://api.deepseek.com/v1".into(),
-            model: model.into(),
-            api_key: std::env::var("DEEPSEEK_API_KEY").ok(),
-        }),
-        "groq" => Ok(OpenAiConfig {
-            base_url: "https://api.groq.com/openai/v1".into(),
-            model: model.into(),
-            api_key: std::env::var("GROQ_API_KEY").ok(),
-        }),
-        unsupported => Err(format!(
-            "Unsupported provider '{}'. Supported providers: 'ollama', 'openai', 'openrouter', 'deepseek', 'groq'",
-            unsupported
-        )),
-    }
+    };
+    let api_key = key_var.and_then(|k| std::env::var(k).ok());
+    Ok(OpenAiConfig {
+        base_url,
+        model: model.into(),
+        api_key,
+    })
 }
 
 pub fn provider_from_spec(spec: &str) -> Result<AnyProvider, String> {
@@ -223,37 +208,15 @@ impl MockProvider {
 
 #[cfg(test)]
 impl LlmProvider for MockProvider {
-    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
+    async fn chat_stream(&self, _params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
         let i = self.idx.fetch_add(1, Ordering::SeqCst);
         if let Some(resp) = self.responses.get(i).cloned() {
             return Ok(resp);
         }
-
-        let prompt = params
-            .history
-            .iter()
-            .find_map(|m| match m {
-                AgentMessage::User(u) => Some(u.as_str()),
-                _ => None,
-            })
-            .unwrap_or("");
-
-        let has_thought = params.history.iter().any(|m| matches!(m, AgentMessage::Thought(_)));
-        if !has_thought {
-            return Ok(LlmResponse {
-                thinking: Some("Reasoning about task".into()),
-                tool_calls: vec![ToolCallRequest {
-                    name: "bash".into(),
-                    input: "echo demo".into(),
-                }],
-                content: None,
-            });
-        }
-
         Ok(LlmResponse {
             thinking: None,
             tool_calls: Vec::new(),
-            content: Some(format!("Completed: {}", prompt)),
+            content: Some("Done.".into()),
         })
     }
 }

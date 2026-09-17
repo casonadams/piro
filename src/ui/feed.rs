@@ -189,13 +189,9 @@ fn clean_scraped_line(raw: &str) -> String {
     if (s.starts_with('┌') && s.ends_with('┐')) || (s.starts_with('└') && s.ends_with('┘')) {
         return String::new();
     }
-    let s = raw.trim_end();
     let s = s.strip_prefix("│ ").unwrap_or(s);
-    let s = s.strip_suffix(" │").unwrap_or(s);
-    let s = s.trim();
-    if s.chars()
-        .all(|c| c == '─' || c == '┌' || c == '┐' || c == '└' || c == '┘' || c == ' ')
-    {
+    let s = s.strip_suffix(" │").unwrap_or(s).trim();
+    if s.chars().all(|c| matches!(c, '─' | '┌' | '┐' | '└' | '┘' | ' ')) {
         String::new()
     } else {
         s.to_string()

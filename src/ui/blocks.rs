@@ -141,6 +141,13 @@ struct CardLayout {
     dim: Style,
 }
 
+fn empty_box_line(inner_w: usize, border: Style) -> FormattedLine {
+    FormattedLine {
+        line: box_line(vec![Span::raw(" ".repeat(inner_w))], border),
+        is_continuation: false,
+    }
+}
+
 fn render_cmd_header(cmd: &str, title: Option<&str>, layout: &CardLayout) -> Vec<FormattedLine> {
     let top_border = match title {
         Some(t) => box_titled_border(t, layout.width, layout.border),
@@ -161,10 +168,7 @@ fn render_cmd_header(cmd: &str, title: Option<&str>, layout: &CardLayout) -> Vec
             is_continuation: wrapped.is_continuation,
         });
     }
-    lines.push(FormattedLine {
-        line: box_line(vec![Span::raw(" ".repeat(layout.inner_w))], layout.border),
-        is_continuation: false,
-    });
+    lines.push(empty_box_line(layout.inner_w, layout.border));
     lines
 }
 
@@ -210,62 +214,42 @@ fn render_output_body(block: &CommandOutputBlock, layout: &CardLayout) -> Vec<Fo
             is_continuation: false,
         }];
     }
-
-    let mut body = Vec::new();
-    for l in &block.lines {
-        for wrapped in wrap_ansi(l, layout.inner_w) {
-            body.push(FormattedLine {
-                line: box_line(wrapped.spans, layout.border),
-                is_continuation: wrapped.is_continuation,
-            });
-        }
-    }
+    let body = block
+        .lines
+        .iter()
+        .flat_map(|l| wrap_ansi(l, layout.inner_w))
+        .map(|w| FormattedLine {
+            line: box_line(w.spans, layout.border),
+            is_continuation: w.is_continuation,
+        })
+        .collect();
     apply_tail_collapse(body, block.expanded, layout)
 }
 
 fn format_status_line(status: &CommandStatus, inner_w: usize, border: Style) -> Option<FormattedLine> {
-    match status {
-        CommandStatus::Failed(code) => {
-            let msg = format!("Command exited with code {}", code);
-            Some(FormattedLine {
-                line: box_line(
-                    vec![Span::styled(
-                        pad_spaces(&msg, inner_w),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )],
-                    border,
-                ),
-                is_continuation: false,
-            })
-        }
-        CommandStatus::Cancelled => Some(FormattedLine {
-            line: box_line(
-                vec![Span::styled(
-                    pad_spaces("Command cancelled", inner_w),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                )],
-                border,
-            ),
-            is_continuation: false,
-        }),
-        _ => None,
-    }
+    let (msg, color) = match status {
+        CommandStatus::Failed(code) => (format!("Command exited with code {}", code), Color::Red),
+        CommandStatus::Cancelled => ("Command cancelled".to_string(), Color::Yellow),
+        _ => return None,
+    };
+    Some(FormattedLine {
+        line: box_line(
+            vec![Span::styled(
+                pad_spaces(&msg, inner_w),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )],
+            border,
+        ),
+        is_continuation: false,
+    })
 }
 
 fn render_block_footer(block: &CommandOutputBlock, layout: &CardLayout) -> Vec<FormattedLine> {
-    let mut lines = vec![FormattedLine {
-        line: box_line(vec![Span::raw(" ".repeat(layout.inner_w))], layout.border),
-        is_continuation: false,
-    }];
-
+    let mut lines = vec![empty_box_line(layout.inner_w, layout.border)];
     if let Some(st_line) = format_status_line(&block.status, layout.inner_w, layout.border) {
         lines.push(st_line);
-        lines.push(FormattedLine {
-            line: box_line(vec![Span::raw(" ".repeat(layout.inner_w))], layout.border),
-            is_continuation: false,
-        });
+        lines.push(empty_box_line(layout.inner_w, layout.border));
     }
-
     let dur = block.duration.unwrap_or_else(|| block.started_at.elapsed());
     let status_str = match block.status {
         CommandStatus::Running => format!("Running {:.1}s", dur.as_secs_f64()),

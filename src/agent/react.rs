@@ -361,6 +361,18 @@ mod tests {
         }
     }
 
+    async fn collect_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            let fin = matches!(ev, AgentEvent::Finished);
+            events.push(ev);
+            if fin {
+                break;
+            }
+        }
+        events
+    }
+
     #[tokio::test]
     async fn test_react_engine_with_hooks() {
         let registry = ToolRegistry::with_defaults();
@@ -375,17 +387,10 @@ mod tests {
 
         let hooks = TrackingHooks::default();
         let engine = ReActEngine::with_hooks(backend, registry, hooks);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let _handle = engine.spawn("test".into(), tx);
 
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            let fin = matches!(ev, AgentEvent::Finished);
-            events.push(ev);
-            if fin {
-                break;
-            }
-        }
+        let events = collect_events(rx).await;
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Thought(_))));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolDone { .. })));
         assert!(events.iter().any(|e| matches!(e, AgentEvent::Response(_))));
@@ -405,17 +410,10 @@ mod tests {
             block_tools: true,
         };
         let engine = ReActEngine::with_hooks(backend, registry, hooks);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let _handle = engine.spawn("test".into(), tx);
 
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            let fin = matches!(ev, AgentEvent::Finished);
-            events.push(ev);
-            if fin {
-                break;
-            }
-        }
+        let events = collect_events(rx).await;
         assert!(events.iter().any(|e| match e {
             AgentEvent::Error(err) => err.contains("blocked by policy"),
             _ => false,
@@ -455,7 +453,7 @@ mod tests {
         let registry = ToolRegistry::with_defaults();
         let backend = MockAgentBackend::from_steps(vec![StepResult::FinalAnswer("Got it".into())]);
         let engine = ReActEngine::new(backend, registry);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let prior = vec![
             AgentMessage::User("first turn".into()),
             AgentMessage::Response("first answer".into()),
@@ -466,14 +464,7 @@ mod tests {
             agent_tx: tx,
         });
 
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            let fin = matches!(ev, AgentEvent::Finished);
-            events.push(ev);
-            if fin {
-                break;
-            }
-        }
+        let events = collect_events(rx).await;
         assert!(
             events
                 .iter()

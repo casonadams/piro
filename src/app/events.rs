@@ -192,32 +192,6 @@ fn handle_scroll_ctrl(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
     }
 }
 
-struct NavBounds {
-    pub max_col: u16,
-    pub page: usize,
-}
-
-fn handle_scroll_nav(app: &mut App, code: KeyCode, bounds: NavBounds) -> bool {
-    match code {
-        KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
-        KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, bounds.max_col),
-        KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
-        KeyCode::Down | KeyCode::Char('j') => {
-            let _ = app.move_cursor_down(1);
-        }
-        KeyCode::Char('0') => app.cursor.col = 2,
-        KeyCode::Char('$') => app.cursor.col = bounds.max_col.saturating_sub(2),
-        KeyCode::PageUp => app.move_cursor_up(bounds.page),
-        KeyCode::PageDown => {
-            let _ = app.move_cursor_down(bounds.page);
-        }
-        KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
-        KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
-        _ => return false,
-    }
-    true
-}
-
 fn handle_scroll_action(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
@@ -248,14 +222,23 @@ fn handle_scroll_action(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
 }
 
 fn handle_scroll_plain(app: &mut App, code: KeyCode, ctx: &mut ScrollCtx) {
-    let bounds = NavBounds {
-        max_col: ctx.width.saturating_sub(1) as u16,
-        page: app.viewport_height.max(1),
-    };
-    if handle_scroll_nav(app, code, bounds) {
-        return;
-    }
+    let max_col = ctx.width.saturating_sub(1) as u16;
+    let page = app.viewport_height.max(1);
     match code {
+        KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
+        KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, max_col),
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
+        KeyCode::Down | KeyCode::Char('j') => {
+            let _ = app.move_cursor_down(1);
+        }
+        KeyCode::Char('0') => app.cursor.col = 2,
+        KeyCode::Char('$') => app.cursor.col = max_col.saturating_sub(2),
+        KeyCode::PageUp => app.move_cursor_up(page),
+        KeyCode::PageDown => {
+            let _ = app.move_cursor_down(page);
+        }
+        KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
         KeyCode::Char('v') | KeyCode::Char(' ') => app.toggle_selection(SelectionType::Char),
         KeyCode::Char('V') => app.toggle_selection(SelectionType::Line),
         KeyCode::Char('o') => app.toggle_expand(),

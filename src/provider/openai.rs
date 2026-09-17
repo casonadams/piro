@@ -62,10 +62,7 @@ impl OpenAiProvider {
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "command": {
-                                    "type": "string",
-                                    "description": "Command or arguments"
-                                }
+                                "command": { "type": "string", "description": "Command or arguments" }
                             },
                             "required": ["command"]
                         }

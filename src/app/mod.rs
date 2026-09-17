@@ -1,288 +1,18 @@
 pub mod cli;
 pub mod events;
+pub mod feed;
+pub mod input;
+pub mod scroll;
 
-use std::cmp::Ordering;
+pub use feed::{CommandOutputBlock, CommandStatus, FeedItem};
+pub use input::{InputIntent, InputState, parse_input_intent};
+pub use scroll::{DocPos, Mode, ScrollBounds, ScrollState, SelectionType};
+
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::agent::{AgentHandle, AgentMessage};
 use crate::sys::ProcessHandle;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputIntent {
-    DirectCommand(String),
-    CommandWithAgent(String),
-    AgentPrompt(String),
-}
-
-pub fn parse_input_intent(input: &str) -> Option<InputIntent> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Some(cmd) = trimmed.strip_prefix("!!") {
-        let cmd = cmd.trim();
-        if !cmd.is_empty() {
-            return Some(InputIntent::DirectCommand(cmd.to_string()));
-        }
-    } else if let Some(cmd) = trimmed.strip_prefix('!') {
-        let cmd = cmd.trim();
-        if !cmd.is_empty() {
-            return Some(InputIntent::CommandWithAgent(cmd.to_string()));
-        }
-    }
-    Some(InputIntent::AgentPrompt(trimmed.to_string()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
-    #[default]
-    Input,
-    Scroll,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SelectionType {
-    #[default]
-    Char,
-    Line,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct DocPos {
-    pub line: usize,
-    pub col: u16,
-}
-
-impl PartialOrd for DocPos {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
-    }
-}
-
-impl Ord for DocPos {
-    fn cmp(&self, o: &Self) -> Ordering {
-        (self.line, self.col).cmp(&(o.line, o.col))
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct InputState {
-    value: String,
-    cursor: usize,
-}
-
-impl InputState {
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.value.split('\n').count()
-    }
-
-    pub fn cursor_coords(&self) -> (usize, usize) {
-        let mut row = 0;
-        let mut col = 0;
-        for (idx, c) in self.value.chars().enumerate() {
-            if idx == self.cursor {
-                return (col, row);
-            }
-            if c == '\n' {
-                row += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-        }
-        (col, row)
-    }
-
-    pub fn move_up(&mut self) -> bool {
-        let (cur_col, cur_row) = self.cursor_coords();
-        if cur_row == 0 {
-            return false;
-        }
-        self.cursor = self.char_idx_for_coords(cur_col, cur_row - 1);
-        true
-    }
-
-    pub fn move_down(&mut self) -> bool {
-        let (cur_col, cur_row) = self.cursor_coords();
-        let total_lines = self.line_count();
-        if cur_row + 1 >= total_lines {
-            return false;
-        }
-        self.cursor = self.char_idx_for_coords(cur_col, cur_row + 1);
-        true
-    }
-
-    fn char_idx_for_coords(&self, col: usize, target_row: usize) -> usize {
-        let mut char_idx = 0;
-        for (row, line) in self.value.split('\n').enumerate() {
-            let line_len = line.chars().count();
-            if row == target_row {
-                return char_idx + col.min(line_len);
-            }
-            char_idx += line_len + 1;
-        }
-        self.value.chars().count()
-    }
-
-    fn byte_idx(&self) -> usize {
-        self.value
-            .char_indices()
-            .nth(self.cursor)
-            .map_or(self.value.len(), |(i, _)| i)
-    }
-
-    pub fn insert(&mut self, c: char) {
-        let i = self.byte_idx();
-        self.value.insert(i, c);
-        self.cursor += 1;
-    }
-
-    pub fn delete_back(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            let i = self.byte_idx();
-            self.value.remove(i);
-        }
-    }
-
-    pub fn delete_forward(&mut self) {
-        if self.cursor < self.value.chars().count() {
-            let i = self.byte_idx();
-            self.value.remove(i);
-        }
-    }
-
-    pub fn delete_prev_word(&mut self) {
-        let b = self.byte_idx();
-        let s = &self.value[..b];
-        let i = s.trim_end().rfind(char::is_whitespace).map_or(0, |x| x + 1);
-        self.value.drain(i..b);
-        self.cursor = self.value[..i].chars().count();
-    }
-
-    pub fn delete_line(&mut self) {
-        let i = self.byte_idx();
-        self.value.drain(..i);
-        self.cursor = 0;
-    }
-
-    pub fn delete_to_end(&mut self) {
-        let i = self.byte_idx();
-        self.value.truncate(i);
-    }
-
-    pub fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-    pub fn move_right(&mut self) {
-        if self.cursor < self.value.chars().count() {
-            self.cursor += 1;
-        }
-    }
-    pub fn move_start(&mut self) {
-        self.cursor = 0;
-    }
-    pub fn move_end(&mut self) {
-        self.cursor = self.value.chars().count();
-    }
-
-    pub fn move_prev_word(&mut self) {
-        let s = &self.value[..self.byte_idx()];
-        let i = s.trim_end().rfind(char::is_whitespace).map_or(0, |x| x + 1);
-        self.cursor = self.value[..i].chars().count();
-    }
-
-    pub fn move_next_word(&mut self) {
-        let s = &self.value[self.byte_idx()..];
-        let trimmed = s.trim_start();
-        let skip = s.len() - trimmed.len();
-        let w = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
-        self.cursor += s[..skip + w].chars().count();
-    }
-
-    pub fn set_value(&mut self, val: String) {
-        self.cursor = val.chars().count();
-        self.value = val;
-    }
-    pub fn take_value(&mut self) -> String {
-        self.cursor = 0;
-        std::mem::take(&mut self.value)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandStatus {
-    Running,
-    Success(i32),
-    Failed(i32),
-    Cancelled,
-}
-
-#[derive(Debug, Clone)]
-pub struct CommandOutputBlock {
-    pub command: String,
-    pub tool: Option<String>,
-    pub status: CommandStatus,
-    pub lines: Vec<String>,
-    pub started_at: Instant,
-    pub duration: Option<Duration>,
-    pub expanded: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum FeedItem {
-    UserInput(String),
-    CommandOutput(CommandOutputBlock),
-    AgentThought(String),
-    AgentResponse(String),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ScrollBounds {
-    pub total: usize,
-    pub view: usize,
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct ScrollState {
-    pub scroll_from_bottom: usize,
-    pub auto_scroll: bool,
-}
-
-impl ScrollState {
-    pub fn scroll_up(&mut self, delta: usize, bounds: ScrollBounds) {
-        if bounds.total > bounds.view {
-            self.scroll_from_bottom = (self.scroll_from_bottom + delta).min(bounds.total - bounds.view);
-            self.auto_scroll = false;
-        }
-    }
-
-    pub fn scroll_down(&mut self, delta: usize) {
-        self.scroll_from_bottom = self.scroll_from_bottom.saturating_sub(delta);
-        if self.scroll_from_bottom == 0 {
-            self.auto_scroll = true;
-        }
-    }
-
-    pub fn visible_range(&self, total: usize, view: usize) -> (usize, usize) {
-        if total <= view {
-            return (0, total);
-        }
-        let max = total - view;
-        let offset = if self.auto_scroll {
-            0
-        } else {
-            self.scroll_from_bottom.min(max)
-        };
-        let start = max - offset;
-        (start, (start + view).min(total))
-    }
-}
 
 #[derive(Debug, Default, Clone)]
 pub struct AppOptions {
@@ -407,18 +137,10 @@ impl App {
     pub fn add_command(&mut self, cmd: String, h: ProcessHandle) {
         self.record_history(&cmd);
         self.feed.push(FeedItem::UserInput(cmd.clone()));
-        self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
-            command: cmd,
-            tool: None,
-            status: CommandStatus::Running,
-            lines: Vec::new(),
-            started_at: Instant::now(),
-            duration: None,
-            expanded: false,
-        }));
+        self.feed
+            .push(FeedItem::CommandOutput(CommandOutputBlock::new(cmd, None)));
         self.active_process = Some(h);
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        self.scroll_to_bottom();
     }
 
     pub fn add_agent_prompt(&mut self, prompt: String, handle: AgentHandle) {
@@ -426,8 +148,7 @@ impl App {
         self.agent_history.push(AgentMessage::User(prompt.clone()));
         self.feed.push(FeedItem::UserInput(prompt));
         self.active_agent = Some(handle);
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        self.scroll_to_bottom();
     }
 
     pub fn clear_feed_and_agent_context(&mut self) {
@@ -436,58 +157,72 @@ impl App {
         self.scroll_to_bottom();
     }
 
-    pub fn append_agent_thought_delta(&mut self, delta: String) {
-        if let Some(FeedItem::AgentThought(text)) = self.feed.last_mut() {
-            text.push_str(&delta);
-        } else {
-            self.feed.push(FeedItem::AgentThought(delta));
+    fn append_slot(&mut self, is_thought: bool, text: String) {
+        match self.feed.last_mut() {
+            Some(FeedItem::AgentThought(t)) if is_thought => {
+                t.push_str(&text);
+                self.scroll_to_bottom();
+                return;
+            }
+            Some(FeedItem::AgentResponse(r)) if !is_thought => {
+                r.push_str(&text);
+                self.scroll_to_bottom();
+                return;
+            }
+            _ => {}
         }
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        let item = if is_thought {
+            FeedItem::AgentThought(text)
+        } else {
+            FeedItem::AgentResponse(text)
+        };
+        self.feed.push(item);
+        self.scroll_to_bottom();
+    }
+
+    fn set_slot(&mut self, is_thought: bool, text: String) {
+        match self.feed.last_mut() {
+            Some(FeedItem::AgentThought(t)) if is_thought => {
+                *t = text;
+                self.scroll_to_bottom();
+                return;
+            }
+            Some(FeedItem::AgentResponse(r)) if !is_thought => {
+                *r = text;
+                self.scroll_to_bottom();
+                return;
+            }
+            _ => {}
+        }
+        let item = if is_thought {
+            FeedItem::AgentThought(text)
+        } else {
+            FeedItem::AgentResponse(text)
+        };
+        self.feed.push(item);
+        self.scroll_to_bottom();
+    }
+
+    pub fn append_agent_thought_delta(&mut self, delta: String) {
+        self.append_slot(true, delta);
     }
 
     pub fn append_agent_response_delta(&mut self, delta: String) {
-        if let Some(FeedItem::AgentResponse(text)) = self.feed.last_mut() {
-            text.push_str(&delta);
-        } else {
-            self.feed.push(FeedItem::AgentResponse(delta));
-        }
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        self.append_slot(false, delta);
     }
 
     pub fn add_agent_thought(&mut self, thought: String) {
-        if let Some(FeedItem::AgentThought(text)) = self.feed.last_mut() {
-            *text = thought;
-        } else {
-            self.feed.push(FeedItem::AgentThought(thought));
-        }
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        self.set_slot(true, thought);
     }
 
     pub fn start_agent_tool(&mut self, name: String, input: String) {
-        self.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
-            command: input,
-            tool: Some(name),
-            status: CommandStatus::Running,
-            lines: Vec::new(),
-            started_at: Instant::now(),
-            duration: None,
-            expanded: false,
-        }));
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        self.feed
+            .push(FeedItem::CommandOutput(CommandOutputBlock::new(input, Some(name))));
+        self.scroll_to_bottom();
     }
 
     pub fn add_agent_response(&mut self, response: String) {
-        if let Some(FeedItem::AgentResponse(text)) = self.feed.last_mut() {
-            *text = response;
-        } else {
-            self.feed.push(FeedItem::AgentResponse(response));
-        }
-        self.scroll.scroll_from_bottom = 0;
-        self.scroll.auto_scroll = true;
+        self.set_slot(false, response);
     }
 
     pub fn finish_agent(&mut self) {
@@ -534,8 +269,7 @@ impl App {
 
     pub fn enter_scroll_mode(&mut self) {
         self.mode = Mode::Scroll;
-        self.selection_anchor = None;
-        self.selection_type = SelectionType::Char;
+        self.clear_selection();
         self.copied_flash = false;
         self.cursor = DocPos {
             line: self.total_feed_lines.saturating_sub(1),
@@ -545,8 +279,7 @@ impl App {
 
     pub fn exit_scroll_mode(&mut self) {
         self.mode = Mode::Input;
-        self.selection_anchor = None;
-        self.selection_type = SelectionType::Char;
+        self.clear_selection();
     }
 
     pub fn toggle_selection(&mut self, t: SelectionType) {
@@ -564,13 +297,7 @@ impl App {
     }
 
     pub fn normalized_selection(&self) -> Option<(DocPos, DocPos)> {
-        self.selection_anchor.map(|a| {
-            if a <= self.cursor {
-                (a, self.cursor)
-            } else {
-                (self.cursor, a)
-            }
-        })
+        self.selection_anchor.map(|a| (a.min(self.cursor), a.max(self.cursor)))
     }
 
     pub fn move_cursor_left(&mut self, d: u16) {
@@ -726,24 +453,6 @@ mod tests {
         assert_eq!((s.line, e.line), (44, 49));
     }
 
-    #[test]
-    fn test_parse_input_intent() {
-        assert_eq!(parse_input_intent(""), None);
-        assert_eq!(parse_input_intent("   "), None);
-        assert_eq!(
-            parse_input_intent("!!ls -la"),
-            Some(InputIntent::DirectCommand("ls -la".into()))
-        );
-        assert_eq!(
-            parse_input_intent("!git status"),
-            Some(InputIntent::CommandWithAgent("git status".into()))
-        );
-        assert_eq!(
-            parse_input_intent("How many files are in this directory?"),
-            Some(InputIntent::AgentPrompt("How many files are in this directory?".into()))
-        );
-    }
-
     #[tokio::test]
     async fn test_agent_history_accumulation_and_clear() {
         let mut app = App::default();
@@ -756,69 +465,5 @@ mod tests {
         app.clear_feed_and_agent_context();
         assert!(app.agent_history.is_empty());
         assert!(app.feed.is_empty());
-    }
-
-    #[test]
-    fn test_input_cursor_coords() {
-        let mut input = InputState::default();
-        assert_eq!(input.line_count(), 1);
-        assert_eq!(input.cursor_coords(), (0, 0));
-
-        input.set_value("first\nsecond\nthird".into());
-        assert_eq!(input.line_count(), 3);
-        // set_value puts cursor at the very end (col 5, row 2)
-        assert_eq!(input.cursor_coords(), (5, 2));
-
-        input.move_start();
-        assert_eq!(input.cursor_coords(), (0, 0));
-
-        // Move to right 5 times -> end of "first"
-        for _ in 0..5 {
-            input.move_right();
-        }
-        assert_eq!(input.cursor_coords(), (5, 0));
-
-        // Move right 1 more -> starts "second"
-        input.move_right();
-        assert_eq!(input.cursor_coords(), (0, 1));
-    }
-
-    #[test]
-    fn test_input_vertical_movement() {
-        let mut input = InputState::default();
-        input.set_value("short\nlonger line\nabc".into());
-
-        // Cursor starts at end: "abc", row 2, col 3
-        assert_eq!(input.cursor_coords(), (3, 2));
-
-        // Move down when already on bottom row -> returns false
-        assert!(!input.move_down());
-        assert_eq!(input.cursor_coords(), (3, 2));
-
-        // Move up to "longer line" -> row 1, col 3
-        assert!(input.move_up());
-        assert_eq!(input.cursor_coords(), (3, 1));
-
-        // Move to end of "longer line" (col 11, row 1)
-        for _ in 0..8 {
-            input.move_right();
-        }
-        assert_eq!(input.cursor_coords(), (11, 1));
-
-        // Move up to "short" (length 5) -> clamps to col 5, row 0
-        assert!(input.move_up());
-        assert_eq!(input.cursor_coords(), (5, 0));
-
-        // Move up when already on top row -> returns false
-        assert!(!input.move_up());
-        assert_eq!(input.cursor_coords(), (5, 0));
-
-        // Move down back to "longer line" -> row 1, col 5
-        assert!(input.move_down());
-        assert_eq!(input.cursor_coords(), (5, 1));
-
-        // Move down to "abc" (length 3) -> clamps to col 3, row 2
-        assert!(input.move_down());
-        assert_eq!(input.cursor_coords(), (3, 2));
     }
 }
