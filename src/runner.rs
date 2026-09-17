@@ -1,6 +1,6 @@
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
@@ -32,22 +32,40 @@ impl ProcessHandle {
     }
 
     pub fn kill(&mut self) {
-        // Immediately abort the stdout and stderr stream readers
         self.out_abort.abort();
         self.err_abort.abort();
 
-        // Kill the child process and process group with SIGKILL
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             unsafe {
                 let p = pid as i32;
+                let _ = libc::kill(-p, libc::SIGTERM);
                 let _ = libc::kill(-p, libc::SIGKILL);
+                let _ = libc::kill(p, libc::SIGTERM);
                 let _ = libc::kill(p, libc::SIGKILL);
             }
         }
 
         self.supervisor.abort();
     }
+}
+
+fn spawn_stream<R: AsyncRead + Unpin + Send + 'static>(
+    stream: Option<R>,
+    tx: mpsc::UnboundedSender<RunnerMsg>,
+) -> (tokio::task::JoinHandle<()>, AbortHandle) {
+    let task = tokio::spawn(async move {
+        if let Some(s) = stream {
+            let mut reader = BufReader::new(s).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                if tx.send(RunnerMsg::Line(line)).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    let abort = task.abort_handle();
+    (task, abort)
 }
 
 pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> ProcessHandle {
@@ -89,34 +107,8 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
 
     #[cfg(unix)]
     let pid = child.id();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let tx_out = tx.clone();
-    let out_task = tokio::spawn(async move {
-        if let Some(out) = stdout {
-            let mut reader = BufReader::new(out).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                if tx_out.send(RunnerMsg::Line(line)).is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    let out_abort = out_task.abort_handle();
-
-    let tx_err = tx.clone();
-    let err_task = tokio::spawn(async move {
-        if let Some(err) = stderr {
-            let mut reader = BufReader::new(err).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                if tx_err.send(RunnerMsg::Line(line)).is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    let err_abort = err_task.abort_handle();
+    let (out_task, out_abort) = spawn_stream(child.stdout.take(), tx.clone());
+    let (err_task, err_abort) = spawn_stream(child.stderr.take(), tx.clone());
 
     let supervisor = tokio::spawn(async move {
         let status = child.wait().await;

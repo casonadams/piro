@@ -31,3 +31,6 @@ The core foundation (async process execution, styled block feed, tmux visual
 selection, and clean split layout) is solid, responsive, and completely free
 of bloat.
 
+
+
+Can we build a very very simple solid `the ReAct loop`?

@@ -33,128 +33,91 @@ async fn main() -> std::io::Result<()> {
             biased;
             Some(Ok(event)) = reader.next() => {
                 match event {
-                    CrosstermEvent::Key(key) => {
-                        match app.mode {
-                            Mode::Input => handle_input_mode_key(&mut app, key, &runner_tx, &mut runner_rx),
-                            Mode::Scroll => handle_scroll_mode_key(&mut app, key, term_width, &mut runner_rx),
-                        }
-                    }
-                    CrosstermEvent::Mouse(mouse) => {
-                        handle_mouse_event(&mut app, mouse, term_width);
-                    }
+                    CrosstermEvent::Key(key) => match app.mode {
+                        Mode::Input => handle_input_key(&mut app, key, &runner_tx, &mut runner_rx),
+                        Mode::Scroll => handle_scroll_key(&mut app, key, term_width, &mut runner_rx),
+                    },
+                    CrosstermEvent::Mouse(mouse) => handle_mouse(&mut app, mouse, term_width),
                     CrosstermEvent::Resize(_, _) => {}
                     _ => {}
                 }
             }
-            Some(msg) = runner_rx.recv() => {
-                match msg {
-                    RunnerMsg::Line(line) => app.append_output_line(line),
-                    RunnerMsg::Done(code, dur) => app.complete_command(code, dur),
-                }
-            }
+            Some(msg) = runner_rx.recv() => match msg {
+                RunnerMsg::Line(line) => app.append_output_line(line),
+                RunnerMsg::Done(code, dur) => app.complete_command(code, dur),
+            },
             _ = ticker.tick() => {}
         }
     }
-
     Ok(())
 }
 
-fn cancel_and_drain(app: &mut App, runner_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>) {
+fn cancel_and_drain(app: &mut App, rx: &mut mpsc::UnboundedReceiver<RunnerMsg>) {
     if app.cancel_active() {
-        while runner_rx.try_recv().is_ok() {}
+        while rx.try_recv().is_ok() {}
     }
 }
 
-fn handle_input_mode_key(
+fn copy_and_flash(app: &mut App, width: usize) {
+    let text = ui::feed::extract_selected_text(app, width);
+    if !text.is_empty() {
+        clipboard::copy_to_clipboard(&text);
+        app.copied_flash = true;
+    }
+    app.clear_selection();
+}
+
+fn handle_input_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
-    runner_tx: &mpsc::UnboundedSender<RunnerMsg>,
-    runner_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
+    tx: &mpsc::UnboundedSender<RunnerMsg>,
+    rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
 ) {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
-                cancel_and_drain(app, runner_rx);
+                cancel_and_drain(app, rx);
                 app.input.take_value();
-                return;
             }
             KeyCode::Char('d') => {
-                // Ctrl+D: exit on empty input, otherwise delete forward
                 if app.input.value().is_empty() {
                     app.running = false;
                 } else {
                     app.input.delete_forward();
                 }
-                return;
             }
             KeyCode::Char('l') => {
-                // Ctrl+L: Clear screen / feed history
                 app.feed.clear();
                 app.scroll_to_bottom();
-                return;
             }
-            KeyCode::Char('s') => {
-                app.enter_scroll_mode();
-                return;
-            }
-            KeyCode::Char('w') => {
-                app.input.delete_prev_word();
-                return;
-            }
-            KeyCode::Char('p') => {
-                app.history_prev();
-                return;
-            }
-            KeyCode::Char('n') => {
-                app.history_next();
-                return;
-            }
-            KeyCode::Char('a') => {
-                app.input.move_start();
-                return;
-            }
-            KeyCode::Char('e') => {
-                app.input.move_end();
-                return;
-            }
-            KeyCode::Char('u') => {
-                app.input.delete_line();
-                return;
-            }
-            KeyCode::Char('k') => {
-                app.input.delete_to_end();
-                return;
-            }
-            KeyCode::Char('o') => {
-                app.toggle_expand();
-                return;
-            }
+            KeyCode::Char('s') => app.enter_scroll_mode(),
+            KeyCode::Char('o') => app.toggle_expand(),
+            KeyCode::Char('w') => app.input.delete_prev_word(),
+            KeyCode::Char('p') => app.history_prev(),
+            KeyCode::Char('n') => app.history_next(),
+            KeyCode::Char('a') => app.input.move_start(),
+            KeyCode::Char('e') => app.input.move_end(),
+            KeyCode::Char('u') => app.input.delete_line(),
+            KeyCode::Char('k') => app.input.delete_to_end(),
             _ => {}
         }
+        return;
     }
 
     if key.modifiers.contains(KeyModifiers::ALT) {
         match key.code {
-            KeyCode::Char('b') => {
-                app.input.move_prev_word();
-                return;
-            }
-            KeyCode::Char('f') => {
-                app.input.move_next_word();
-                return;
-            }
-            KeyCode::Backspace => {
-                app.input.delete_prev_word();
-                return;
-            }
+            KeyCode::Char('b') => app.input.move_prev_word(),
+            KeyCode::Char('f') => app.input.move_next_word(),
+            KeyCode::Backspace => app.input.delete_prev_word(),
             _ => {}
         }
+        return;
     }
 
     match key.code {
         KeyCode::Esc => {
             if app.is_command_running() {
-                cancel_and_drain(app, runner_rx);
+                cancel_and_drain(app, rx);
             } else if app.input.value().is_empty() {
                 app.enter_scroll_mode();
             } else {
@@ -174,7 +137,7 @@ fn handle_input_mode_key(
                 if app.is_command_running() {
                     app.append_output_line("Command already running, press Esc to cancel.".into());
                 } else {
-                    let handle = spawn_command(cmd.clone(), runner_tx.clone());
+                    let handle = spawn_command(cmd.clone(), tx.clone());
                     app.add_command(cmd, handle);
                 }
             }
@@ -190,19 +153,19 @@ fn handle_input_mode_key(
     }
 }
 
-fn handle_scroll_mode_key(
+fn handle_scroll_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
-    term_width: usize,
-    runner_rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
+    width: usize,
+    rx: &mut mpsc::UnboundedReceiver<RunnerMsg>,
 ) {
-    let max_col = term_width.saturating_sub(1) as u16;
+    let max_col = width.saturating_sub(1) as u16;
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => {
                 if app.is_command_running() {
-                    cancel_and_drain(app, runner_rx);
+                    cancel_and_drain(app, rx);
                 }
                 if app.selection_anchor.is_some() {
                     app.clear_selection();
@@ -210,85 +173,54 @@ fn handle_scroll_mode_key(
                     app.exit_scroll_mode();
                 }
             }
+            KeyCode::Char('o') => app.toggle_expand(),
+            KeyCode::Char('u') => app.move_cursor_up(10),
             KeyCode::Char('d') => {
                 let _ = app.move_cursor_down(10);
             }
-            KeyCode::Char('u') => app.move_cursor_up(10),
             _ => {}
         }
         return;
     }
 
     match key.code {
-        // Toggle character visual selection (like tmux 'v' / Space)
-        KeyCode::Char('v') | KeyCode::Char(' ') => {
-            app.toggle_selection(SelectionType::Char);
-        }
-        // Toggle full-line visual selection (Shift+V)
-        KeyCode::Char('V') => {
-            app.toggle_selection(SelectionType::Line);
-        }
-        // Copy entire command block (convenient 1-key block copy)
+        KeyCode::Char('v') | KeyCode::Char(' ') => app.toggle_selection(SelectionType::Char),
+        KeyCode::Char('V') => app.toggle_selection(SelectionType::Line),
+        KeyCode::Char('o') => app.toggle_expand(),
         KeyCode::Char('b') => {
             if let Some(text) = app.copy_current_block() {
                 clipboard::copy_to_clipboard(&text);
                 app.copied_flash = true;
             }
         }
-        // Toggle expand / collapse
-        KeyCode::Char('o') => {
-            app.toggle_expand();
-        }
-        // 'y': yank and KEEP cursor where it is!
         KeyCode::Char('y') => {
-            let width = term_width.saturating_sub(1);
             if app.selection_anchor.is_none() {
                 app.selection_type = SelectionType::Line;
                 app.selection_anchor = Some(app.cursor);
             }
-            let text = ui::feed::extract_selected_text(app, width);
-            if !text.is_empty() {
-                clipboard::copy_to_clipboard(&text);
-                app.copied_flash = true;
-            }
-            app.clear_selection();
-            // Stays in scroll mode!
+            copy_and_flash(app, width);
         }
-        // 'Enter': yank and RETURN to input!
         KeyCode::Enter => {
-            let width = term_width.saturating_sub(1);
             if app.selection_anchor.is_none() {
                 app.selection_type = SelectionType::Line;
                 app.selection_anchor = Some(app.cursor);
             }
-            let text = ui::feed::extract_selected_text(app, width);
-            if !text.is_empty() {
-                clipboard::copy_to_clipboard(&text);
-                app.copied_flash = true;
-            }
-            app.clear_selection();
+            copy_and_flash(app, width);
             app.exit_scroll_mode();
         }
-        // 'q': drop out only!
-        KeyCode::Char('q') => {
-            app.clear_selection();
-            app.exit_scroll_mode();
-        }
-        // 'Esc': cancel running command if running, or clear selection, or drop out
         KeyCode::Esc => {
-            if app.is_command_running() {
-                cancel_and_drain(app, runner_rx);
-            } else if app.selection_anchor.is_some() {
+            if app.selection_anchor.is_some() {
                 app.clear_selection();
+            } else if app.is_command_running() {
+                cancel_and_drain(app, rx);
             } else {
                 app.exit_scroll_mode();
             }
         }
-        KeyCode::Char('i') => {
+        KeyCode::Char('q') | KeyCode::Char('i') => {
             app.clear_selection();
             app.exit_scroll_mode();
         }
-        // 2D Cursor movement in document
         KeyCode::Left | KeyCode::Char('h') => app.move_cursor_left(1),
         KeyCode::Right | KeyCode::Char('l') => app.move_cursor_right(1, max_col),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor_up(1),
@@ -307,7 +239,7 @@ fn handle_scroll_mode_key(
     }
 }
 
-fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, term_width: usize) {
+fn handle_mouse(app: &mut App, mouse: crossterm::event::MouseEvent, width: usize) {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             if app.mode == Mode::Input {
@@ -336,14 +268,10 @@ fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, term_w
         MouseEventKind::Up(MouseButton::Left) if app.mode == Mode::Scroll => {
             if let Some(anchor) = app.selection_anchor {
                 if anchor != app.cursor {
-                    let width = term_width.saturating_sub(1);
-                    let text = ui::feed::extract_selected_text(app, width);
-                    if !text.is_empty() {
-                        clipboard::copy_to_clipboard(&text);
-                        app.copied_flash = true;
-                    }
+                    copy_and_flash(app, width);
+                } else {
+                    app.clear_selection();
                 }
-                app.clear_selection();
             }
         }
         _ => {}
