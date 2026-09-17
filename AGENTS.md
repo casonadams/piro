@@ -46,6 +46,10 @@ src/
    - Maintain minimal dependency set: no heavy umbrella crates, no `chrono`.
 4. **File Length**:
    - Keep files modular (< 300 lines per file where possible).
+5. **Hermetic Testing Invariant**:
+   - Unit tests (`cargo test`) MUST be 100% offline, deterministic, and hermetic.
+   - Never perform live network I/O, connect to localhost daemons (e.g. Ollama, Docker), or rely on external internet access in tests.
+   - All provider communication and external interactions in tests must be mocked.
 
 ## Prompt Routing & Operational Modes
 

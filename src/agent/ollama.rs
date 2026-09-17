@@ -186,12 +186,34 @@ mod tests {
         assert_eq!(res.content.as_deref(), Some("Found 5 files in the project."));
     }
 
-    #[tokio::test]
-    async fn test_live_ollama_query_if_running() {
+    #[test]
+    fn test_format_ollama_messages_and_tools() {
         let provider = OllamaProvider::new("ornith-1.5:35b".into());
-        let history = vec![AgentMessage::User("Respond in one word: ready?".into())];
-        if let Ok(resp) = provider.chat(&history, &[]).await {
-            assert!(resp.content.is_some() || resp.thinking.is_some());
-        }
+        let history = vec![
+            AgentMessage::User("list files".into()),
+            AgentMessage::Thought("pondering".into()),
+            AgentMessage::ToolCall {
+                name: "bash".into(),
+                input: "ls".into(),
+            },
+            AgentMessage::Observation {
+                output: "file1".into(),
+                success: true,
+            },
+        ];
+        let msgs = provider.format_messages(&history);
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["thinking"], "pondering");
+        assert_eq!(msgs[2]["tool_calls"][0]["function"]["name"], "bash");
+        assert_eq!(msgs[3]["role"], "tool");
+
+        let tools = vec![ToolDefinition {
+            name: "bash",
+            description: "shell command",
+        }];
+        let formatted = provider.format_tools(&tools);
+        assert_eq!(formatted.len(), 1);
+        assert_eq!(formatted[0]["function"]["name"], "bash");
     }
 }
