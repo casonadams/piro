@@ -37,6 +37,7 @@ impl AgentHandle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRequest {
     pub name: String,
     pub input: String,

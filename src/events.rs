@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentEvent, MockAgentBackend, ToolRegistry, spawn_agent};
+use crate::agent::{AgentEvent, ToolRegistry, spawn_agent};
 use crate::app::{App, InputIntent, Mode, SelectionType, parse_input_intent};
 use crate::clipboard;
 use crate::runner::{RunnerMsg, spawn_command};
@@ -62,10 +62,12 @@ pub fn submit_input(
             app.add_command(cmd.clone(), spawn_command(cmd, runner_tx.clone()));
         }
         InputIntent::AgentPrompt(prompt) => {
+            let registry = ToolRegistry::with_defaults();
+            let backend = crate::agent::default_backend(&registry);
             let config = crate::agent::AgentConfig {
                 prompt: prompt.clone(),
-                backend: MockAgentBackend::new(),
-                registry: ToolRegistry::with_defaults(),
+                backend,
+                registry,
             };
             let handle = spawn_agent(config, agent_tx.clone());
             app.add_agent_prompt(prompt, handle);

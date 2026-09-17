@@ -63,6 +63,12 @@ impl Tool for BashTool {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDefinition {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
 #[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
@@ -91,10 +97,20 @@ impl ToolRegistry {
         &self.tools
     }
 
-    pub fn format_descriptions(&self) -> String {
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.list()
             .iter()
-            .map(|t| format!("- {}: {}", t.name(), t.description()))
+            .map(|t| ToolDefinition {
+                name: t.name(),
+                description: t.description(),
+            })
+            .collect()
+    }
+
+    pub fn format_descriptions(&self) -> String {
+        self.definitions()
+            .iter()
+            .map(|t| format!("- {}: {}", t.name, t.description))
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -1,10 +1,14 @@
 pub mod backend;
+pub mod provider;
 pub mod react;
 pub mod tool;
 
 use tokio::sync::mpsc;
 
-pub use backend::{AgentBackend, MockAgentBackend};
+pub use backend::AgentBackend;
+#[cfg(test)]
+pub use backend::MockAgentBackend;
+pub use provider::{MockProvider, ProviderBackend};
 pub use react::{AgentEvent, AgentHandle, ReActEngine};
 pub use tool::ToolRegistry;
 
@@ -12,6 +16,10 @@ pub struct AgentConfig<B> {
     pub prompt: String,
     pub backend: B,
     pub registry: ToolRegistry,
+}
+
+pub fn default_backend(registry: &ToolRegistry) -> ProviderBackend<MockProvider> {
+    ProviderBackend::new(MockProvider::new(), registry.definitions())
 }
 
 pub fn spawn_agent<B: AgentBackend + 'static>(

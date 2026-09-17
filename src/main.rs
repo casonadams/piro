@@ -8,7 +8,7 @@ mod ui;
 
 use std::time::Duration;
 
-use agent::{AgentConfig, AgentEvent, MockAgentBackend, ToolRegistry, spawn_agent};
+use agent::{AgentConfig, AgentEvent, ToolRegistry, spawn_agent};
 use app::{App, FeedItem, Mode};
 use crossterm::event::{Event as CrosstermEvent, EventStream};
 use events::{handle_input_key, handle_mouse, handle_scroll_key};
@@ -109,10 +109,12 @@ fn handle_runner_msg(app: &mut App, msg: RunnerMsg, agent_tx: &mpsc::UnboundedSe
                     })
                     .unwrap_or_default();
                 let prompt = format!("Executed '{}'. Output:\n{}", cmd, output);
+                let registry = ToolRegistry::with_defaults();
+                let backend = agent::default_backend(&registry);
                 let config = AgentConfig {
                     prompt,
-                    backend: MockAgentBackend::new(),
-                    registry: ToolRegistry::with_defaults(),
+                    backend,
+                    registry,
                 };
                 let handle = spawn_agent(config, agent_tx.clone());
                 app.active_agent = Some(handle);

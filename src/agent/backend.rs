@@ -21,23 +21,25 @@ pub trait AgentBackend: Send + Sync {
     ) -> impl std::future::Future<Output = Result<StepResult, String>> + Send;
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub struct MockAgentBackend {
     steps: Vec<StepResult>,
     step_idx: usize,
 }
 
+#[cfg(test)]
 impl MockAgentBackend {
     pub fn new() -> Self {
         Self::default()
     }
 
-    #[cfg(test)]
     pub fn from_steps(steps: Vec<StepResult>) -> Self {
         Self { steps, step_idx: 0 }
     }
 }
 
+#[cfg(test)]
 impl AgentBackend for MockAgentBackend {
     async fn next_step(&mut self, history: &[AgentMessage]) -> Result<StepResult, String> {
         if let Some(step) = self.steps.get(self.step_idx).cloned() {
@@ -57,6 +59,7 @@ impl AgentBackend for MockAgentBackend {
     }
 }
 
+#[cfg(test)]
 fn resolve_demo_step(prompt: &str, history: &[AgentMessage]) -> StepResult {
     let (tool_cmd, thought) = if prompt.contains("count") || prompt.contains("list") {
         (Some("ls -1"), "Listing directory files...")
@@ -125,5 +128,12 @@ mod tests {
             backend.next_step(&[]).await.unwrap(),
             StepResult::FinalAnswer("finished".into())
         );
+    }
+
+    #[tokio::test]
+    async fn test_mock_rule_based() {
+        let mut backend = MockAgentBackend::new();
+        let step = backend.next_step(&[]).await.unwrap();
+        assert!(matches!(step, StepResult::Thought(_)));
     }
 }
