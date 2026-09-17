@@ -78,22 +78,17 @@ The application provides two operational modes:
      - `g` / `Home`: jump to top of feed
      - `G` / `End`: jump to bottom of feed
      - `i` / `q`: exit Scroll Mode and return to input prompt.
-   - **Visual Line Selection (Tmux-Style)**:
-     - Press `v` or `Space` to toggle visual selection anchor.
-     - Move with `k`/`j` or `Up`/`Down` to extend the highlighted selection range across lines.
-     - Highlighted lines are visually inverted (`Modifier::REVERSED`).
-     - Press `y` or `Enter` to yank (copy) selected lines to the system clipboard via OSC 52 escape codes and macOS `pbcopy`.
-     - Press `Esc` to cancel visual selection (or exit scroll mode if no selection is active).
-   - **Character-Level Mouse Drag Selection (Maki-Style)**:
-     - Left-click and drag across any text to select words, spans, or multi-line blocks with **exact character-level precision** (not forced to full lines).
-     - The selection is highlighted in real time directly on the Ratatui frame buffer (`Modifier::REVERSED`).
-     - Releasing the mouse button scrapes the buffer cells directly, automatically strips box-drawing border glyphs (`│`), and copies clean text to the clipboard.
-   - **One-Key Block Copy**:
-     - Pressing `b` in Scroll Mode instantly copies the entire output of the current command block to the system clipboard.
+   - **Unified Selection Model (Maki-Style)**:
+     - **Mouse**: Left-click and drag across any text to highlight words, spans, or multi-line blocks with exact character precision. **Releasing the mouse immediately copies the text and clears the highlight** (`selection_state = None`, matching maki).
+     - **Keyboard**:
+       - Move with `h`/`j`/`k`/`l` or arrow keys with the visible hardware cursor positioned directly in the feed.
+       - Press `v` or `Space` to anchor visual selection; moving the cursor extends the highlighted span/block just like dragging with a mouse.
+       - Press `y` or `Enter` to copy to clipboard, clear the highlight, and return to the input prompt.
+       - Press `Esc` to clear selection (or exit scroll mode if not selecting).
+     - **One-Key Block Copy (`b`)**: Pressing `b` in Scroll Mode instantly copies the entire output of the current command block.
    - Footer displays:
-     - Default: ` SCROLL MODE   [↑/↓/jk] Move  [v] Select  [b] Copy block  [i/q/Esc] Return `
-     - When Selecting (Mouse): ` SELECTING   [Drag across text, release mouse to copy] `
-     - When Selecting (Keyboard): ` VISUAL SELECT   [↑/↓/jk] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
+     - Default: ` SCROLL   [hjkl/arrows] Move  [v/Space] Select  [b] Copy block  [i/q/Esc] Return `
+     - When Selecting: ` VISUAL   [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
      - On copy: shows temporary ` [Copied to clipboard!] ` confirmation.
 
 ## UI & Layout Invariants

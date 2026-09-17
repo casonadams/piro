@@ -42,42 +42,29 @@ pub fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(spans)
         }
         Mode::Scroll => {
-            if app.mouse_selection.is_some() {
+            if app.selection_anchor.is_some() {
                 let badge = Span::styled(
-                    " SELECTING ",
+                    " VISUAL ",
                     Style::default()
                         .bg(Color::Yellow)
                         .fg(Color::Black)
                         .add_modifier(Modifier::BOLD),
                 );
                 let hints = Span::styled(
-                    " [Drag across text, release mouse to copy]",
-                    Style::default().fg(Color::White),
-                );
-                Line::from(vec![badge, hints])
-            } else if app.selection_anchor.is_some() {
-                let badge = Span::styled(
-                    " VISUAL SELECT ",
-                    Style::default()
-                        .bg(Color::Yellow)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                );
-                let hints = Span::styled(
-                    " [↑/↓/jk] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel",
+                    " [hjkl/arrows] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel",
                     Style::default().fg(Color::White),
                 );
                 Line::from(vec![badge, hints])
             } else {
                 let badge = Span::styled(
-                    " SCROLL MODE ",
+                    " SCROLL ",
                     Style::default()
                         .bg(Color::Cyan)
                         .fg(Color::Black)
                         .add_modifier(Modifier::BOLD),
                 );
                 let hints = Span::styled(
-                    " [↑/↓/jk] Move  [v] Select  [b] Copy block  [i/q/Esc] Return",
+                    " [hjkl/arrows] Move  [v/Space] Select  [b] Copy block  [i/q/Esc] Return",
                     Style::default().fg(Color::White),
                 );
                 let mut spans = vec![badge, hints];

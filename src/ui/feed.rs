@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph},
@@ -41,29 +41,6 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let (start, end) = app.scroll.visible_range(lines.len(), view_h);
     let mut visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(end - start).collect();
 
-    // In Keyboard Scroll Mode without mouse selection, highlight cursor and line selection
-    if app.mode == Mode::Scroll && app.mouse_selection.is_none() {
-        let sel = app
-            .selection_anchor
-            .map(|a| (a.min(app.cursor_line), a.max(app.cursor_line)));
-
-        for (i, line) in visible.iter_mut().enumerate() {
-            let abs_idx = start + i;
-            let is_selected = sel.is_some_and(|(min, max)| abs_idx >= min && abs_idx <= max);
-            let is_cursor = abs_idx == app.cursor_line;
-
-            if is_selected {
-                for span in line.spans.iter_mut() {
-                    span.style = span.style.add_modifier(Modifier::REVERSED);
-                }
-            } else if is_cursor {
-                for span in line.spans.iter_mut() {
-                    span.style = span.style.bg(Color::Rgb(35, 45, 60)).add_modifier(Modifier::BOLD);
-                }
-            }
-        }
-    }
-
     // Bottom-anchor content if it fits within the viewport height and auto-scrolling
     if visible.len() < view_h && app.scroll.auto_scroll {
         let pad = view_h - visible.len();
@@ -74,13 +51,20 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
 
     frame.render_widget(Paragraph::new(visible), area);
 
-    // Apply mouse drag highlight directly on frame buffer cells (character precision)
-    if let Some(ref sel) = app.mouse_selection {
-        apply_mouse_highlight(frame.buffer_mut(), sel, area);
+    // Apply visual selection highlight across cells in the buffer
+    if let Some(sel) = app.current_selection() {
+        apply_selection_highlight(frame.buffer_mut(), &sel, area);
+    }
+
+    // In Scroll Mode, place the hardware terminal cursor directly at the cursor position
+    if app.mode == Mode::Scroll {
+        let cur_x = area.x + app.cursor_pos.col.min(area.width.saturating_sub(1));
+        let cur_y = area.y + app.cursor_pos.row.min(area.height.saturating_sub(1));
+        frame.set_cursor_position(Position::new(cur_x, cur_y));
     }
 }
 
-pub fn apply_mouse_highlight(buf: &mut Buffer, sel: &TextSelection, area: Rect) {
+pub fn apply_selection_highlight(buf: &mut Buffer, sel: &TextSelection, area: Rect) {
     let (start, end) = sel.normalized();
     let row_start = start.row.clamp(area.y, area.bottom().saturating_sub(1));
     let row_end = end.row.clamp(area.y, area.bottom().saturating_sub(1));
@@ -105,7 +89,7 @@ pub fn apply_mouse_highlight(buf: &mut Buffer, sel: &TextSelection, area: Rect) 
     }
 }
 
-pub fn extract_mouse_selection_from_buf(buf: &Buffer, sel: &TextSelection, area: Rect) -> String {
+pub fn extract_selection_from_buf(buf: &Buffer, sel: &TextSelection, area: Rect) -> String {
     let (start, end) = sel.normalized();
     let row_start = start.row.clamp(area.y, area.bottom().saturating_sub(1));
     let row_end = end.row.clamp(area.y, area.bottom().saturating_sub(1));
@@ -163,37 +147,4 @@ fn clean_scraped_line(raw: &str) -> String {
         return String::new();
     }
     s.to_string()
-}
-
-pub fn get_keyboard_selected_text(app: &App, width: usize) -> String {
-    let mut all_lines = Vec::new();
-    for item in &app.feed {
-        match item {
-            FeedItem::UserInput(cmd) => all_lines.extend(render_user_input_block(cmd, width)),
-            FeedItem::CommandOutput(b) => all_lines.extend(render_command_output_block(b, width)),
-        }
-        lines_push_spacer(&mut all_lines);
-    }
-
-    let (start_idx, end_idx) = match app.selection_anchor {
-        Some(a) => (a.min(app.cursor_line), a.max(app.cursor_line)),
-        None => (app.cursor_line, app.cursor_line),
-    };
-
-    let mut result = Vec::new();
-    for (i, line) in all_lines.iter().enumerate() {
-        if i >= start_idx && i <= end_idx {
-            let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let cleaned = clean_scraped_line(&raw);
-            if !cleaned.is_empty() {
-                result.push(cleaned);
-            }
-        }
-    }
-
-    result.join("\n")
-}
-
-fn lines_push_spacer(lines: &mut Vec<Line<'static>>) {
-    lines.push(Line::from(""));
 }
