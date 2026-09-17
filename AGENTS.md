@@ -60,7 +60,16 @@ cargo build --release
 cargo run
 ```
 
-## Key UX & Styling Rules
+## Binary Size & Optimization
+
+The project minimizes binary bloat and compile times:
+- `ratatui` is configured with `default-features = false` (`crossterm`, `std`), omitting unused widget dependencies (e.g. `widget-calendar` which pulls in the `time` crate).
+- `tokio` features are strictly pruned to `["rt-multi-thread", "macros", "process", "io-util", "sync", "time"]` (omits unused `net`, `fs`, `signal`, `tracing`, `socket2`).
+- `futures-util` with `default-features = false` is used instead of the full `futures` umbrella crate.
+- Release builds enable Fat LTO, single codegen unit, abort on panic, and binary stripping, bringing release binary size down under 1 MB.
+
+Run `cargo bloat --release --crates` to verify crate binary contributions.
+
 
 1. **User Input Area**: Bounded only by top and bottom horizontal rules `─...─` with no side borders (`│`) and no prompt symbol (`>`).
 2. **Empty Space Separator**: Exactly 1 blank row separates the output feed from the input area's top rule.

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use app::App;
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers, MouseEventKind};
-use futures::StreamExt;
+use futures_util::StreamExt;
 use runner::{RunnerMsg, spawn_command};
 use terminal::TerminalGuard;
 use tokio::sync::mpsc;
