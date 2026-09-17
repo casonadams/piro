@@ -7,7 +7,7 @@ mod ui;
 use std::time::Duration;
 
 use app::{App, Mode};
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers};
+use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
 use runner::{RunnerMsg, spawn_command};
 use terminal::TerminalGuard;
@@ -35,13 +35,16 @@ async fn main() -> std::io::Result<()> {
                 }
             }
             Some(Ok(event)) = reader.next() => {
+                let term_width = terminal.size()?.width as usize;
                 match event {
                     CrosstermEvent::Key(key) => {
-                        let term_width = terminal.size()?.width as usize;
                         match app.mode {
                             Mode::Input => handle_input_mode_key(&mut app, key, &runner_tx),
                             Mode::Scroll => handle_scroll_mode_key(&mut app, key, term_width),
                         }
+                    }
+                    CrosstermEvent::Mouse(mouse) => {
+                        handle_mouse_event(&mut app, mouse, term_width);
                     }
                     CrosstermEvent::Resize(_, _) => {}
                     _ => {}
@@ -158,6 +161,44 @@ fn handle_scroll_mode_key(app: &mut App, key: crossterm::event::KeyEvent, term_w
         KeyCode::PageDown => app.move_cursor_down(10),
         KeyCode::Home | KeyCode::Char('g') => app.scroll_to_top(),
         KeyCode::End | KeyCode::Char('G') => app.scroll_to_bottom(),
+        _ => {}
+    }
+}
+
+fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEvent, term_width: usize) {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if app.mode == Mode::Input {
+                app.enter_scroll_mode();
+            }
+            app.move_cursor_up(3);
+        }
+        MouseEventKind::ScrollDown => {
+            app.move_cursor_down(3);
+            if app.scroll.auto_scroll || app.scroll.scroll_from_bottom == 0 {
+                app.exit_scroll_mode();
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(line_idx) = app.screen_row_to_feed_line(mouse.row) {
+                app.enter_scroll_mode();
+                app.cursor_line = line_idx;
+                app.selection_anchor = Some(line_idx);
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.mode == Mode::Scroll => {
+            if let Some(line_idx) = app.screen_row_to_feed_line(mouse.row) {
+                app.cursor_line = line_idx;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) if app.mode == Mode::Scroll && app.selection_anchor.is_some() => {
+            let width = term_width.saturating_sub(1);
+            let text = ui::feed::get_selected_text(app, width);
+            if !text.is_empty() {
+                clipboard::copy_to_clipboard(&text);
+                app.copied_flash = true;
+            }
+        }
         _ => {}
     }
 }

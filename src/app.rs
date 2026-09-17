@@ -300,6 +300,31 @@ impl App {
             self.cursor_line = self.total_feed_lines.saturating_sub(1);
         }
     }
+
+    pub fn screen_row_to_feed_line(&self, row: u16) -> Option<usize> {
+        if self.total_feed_lines == 0 || self.viewport_height == 0 {
+            return None;
+        }
+        let row = row as usize;
+        if row >= self.viewport_height {
+            return None;
+        }
+        let (start, end) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
+        let visible_count = end - start;
+
+        let pad = if visible_count < self.viewport_height && self.scroll.auto_scroll {
+            self.viewport_height - visible_count
+        } else {
+            0
+        };
+
+        if row < pad {
+            None
+        } else {
+            let offset = row - pad;
+            Some((start + offset).min(self.total_feed_lines.saturating_sub(1)))
+        }
+    }
 }
 
 #[cfg(test)]

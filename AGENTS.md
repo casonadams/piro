@@ -84,8 +84,10 @@ The application provides two operational modes:
      - Highlighted lines are visually inverted (`Modifier::REVERSED`).
      - Press `y` or `Enter` to yank (copy) selected lines to the system clipboard via OSC 52 escape codes and macOS `pbcopy`.
      - Press `Esc` to cancel visual selection (or exit scroll mode if no selection is active).
-   - **Mouse Selection**:
-     - Mouse drag natively highlights text for standard `Cmd+C` copy.
+   - **Mouse Interaction**:
+     - **Scroll Up (Wheel)**: Automatically enters Scroll Mode from Input Mode and scrolls up into history.
+     - **Scroll Down (Wheel)**: Scrolls down; reaching the bottom automatically exits Scroll Mode and returns to Input Mode.
+     - **Click & Drag**: Left-click anchors selection, dragging highlights lines in real time, and **releasing the mouse automatically copies the selected lines to the clipboard** and flashes `[Copied!]`.
    - Footer displays:
      - Default: ` SCROLL MODE   [↑/↓/jk] Move  [v/Space] Select  [y] Copy line  [i/q/Esc] Return `
      - When Selecting: ` VISUAL SELECT   [↑/↓/jk] Extend  [y/Enter] Copy  [v/Space/Esc] Cancel `
