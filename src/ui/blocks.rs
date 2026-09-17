@@ -13,18 +13,39 @@ pub struct FormattedLine {
     pub is_continuation: bool,
 }
 
-fn box_border(left: char, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
-    let inner = fill.to_string().repeat(width.saturating_sub(2));
-    Line::from(vec![Span::styled(format!("{}{}{}", left, inner, right), style)])
+#[derive(Clone, Copy)]
+struct BorderCaps {
+    pub left: char,
+    pub fill: char,
+    pub right: char,
 }
 
-fn box_titled_border(left: char, title: &str, fill: char, right: char, width: usize, style: Style) -> Line<'static> {
+const TOP_CAPS: BorderCaps = BorderCaps {
+    left: '┌',
+    fill: '─',
+    right: '┐',
+};
+const BOTTOM_CAPS: BorderCaps = BorderCaps {
+    left: '└',
+    fill: '─',
+    right: '┘',
+};
+
+fn box_border(caps: BorderCaps, width: usize, style: Style) -> Line<'static> {
+    let inner = caps.fill.to_string().repeat(width.saturating_sub(2));
+    Line::from(vec![Span::styled(
+        format!("{}{}{}", caps.left, inner, caps.right),
+        style,
+    )])
+}
+
+fn box_titled_border(title: &str, width: usize, style: Style) -> Line<'static> {
     let t_len = str_width(title);
     if width < t_len + 3 {
-        return box_border(left, fill, right, width, style);
+        return box_border(TOP_CAPS, width, style);
     }
     let rem = width.saturating_sub(3 + t_len);
-    let border_str = format!("{}{}{}{}{}", left, fill, title, fill.to_string().repeat(rem), right);
+    let border_str = format!("┌─{}{}{}┐", title, "─".repeat(rem), "");
     Line::from(vec![Span::styled(border_str, style)])
 }
 
@@ -35,115 +56,178 @@ fn box_line(spans: Vec<Span<'static>>, border_style: Style) -> Line<'static> {
     Line::from(line_spans)
 }
 
-pub fn render_user_input_block(command: &str, width: usize) -> Vec<FormattedLine> {
-    let style = Style::default().fg(Color::Cyan);
+struct TextCard<'a> {
+    title: &'a str,
+    text: &'a str,
+    color: Color,
+    empty_hint: Option<&'a str>,
+}
+
+fn render_text_card(card: TextCard, width: usize) -> Vec<FormattedLine> {
+    let style = Style::default().fg(card.color);
+    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
     let inner_w = width.saturating_sub(4);
+    let top_border = if card.title.is_empty() {
+        box_border(TOP_CAPS, width, style)
+    } else {
+        box_titled_border(card.title, width, style)
+    };
     let mut lines = vec![FormattedLine {
-        line: box_border('┌', '─', '┐', width, style),
+        line: top_border,
         is_continuation: false,
     }];
-    for (idx, wrapped) in wrap_ansi(command, inner_w).into_iter().enumerate() {
-        lines.push(FormattedLine {
-            line: box_line(wrapped, style),
-            is_continuation: idx > 0,
-        });
+    if card.text.trim().is_empty() {
+        if let Some(hint) = card.empty_hint {
+            lines.push(FormattedLine {
+                line: box_line(vec![Span::styled(pad_spaces(hint, inner_w), dim)], style),
+                is_continuation: false,
+            });
+        }
+    } else {
+        for (idx, wrapped) in wrap_ansi(card.text, inner_w).into_iter().enumerate() {
+            lines.push(FormattedLine {
+                line: box_line(wrapped, style),
+                is_continuation: idx > 0,
+            });
+        }
     }
     lines.push(FormattedLine {
-        line: box_border('└', '─', '┘', width, style),
+        line: box_border(BOTTOM_CAPS, width, style),
         is_continuation: false,
     });
     lines
 }
 
-pub fn render_command_block_with_title(
-    title: Option<&str>,
-    cmd: &str,
-    block: &CommandOutputBlock,
+pub fn render_user_input_block(command: &str, width: usize) -> Vec<FormattedLine> {
+    render_text_card(
+        TextCard {
+            title: "",
+            text: command,
+            color: Color::Cyan,
+            empty_hint: None,
+        },
+        width,
+    )
+}
+
+pub fn render_agent_thought_block(thought: &str, width: usize) -> Vec<FormattedLine> {
+    render_text_card(
+        TextCard {
+            title: " Thought ",
+            text: thought,
+            color: Color::Magenta,
+            empty_hint: Some("Thinking..."),
+        },
+        width,
+    )
+}
+
+pub fn render_agent_response_block(response: &str, width: usize) -> Vec<FormattedLine> {
+    render_text_card(
+        TextCard {
+            title: " Agent ",
+            text: response,
+            color: Color::Cyan,
+            empty_hint: None,
+        },
+        width,
+    )
+}
+
+struct CardLayout {
     width: usize,
-) -> Vec<FormattedLine> {
-    let color = match block.status {
-        CommandStatus::Running => Color::Yellow,
-        CommandStatus::Success(_) => Color::Green,
-        CommandStatus::Failed(_) => Color::Red,
-        CommandStatus::Cancelled => Color::DarkGray,
-    };
-    let border = Style::default().fg(color);
-    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
-    let inner_w = width.saturating_sub(4);
-    let spacer = || FormattedLine {
-        line: box_line(vec![Span::raw(" ".repeat(inner_w))], border),
-        is_continuation: false,
-    };
+    inner_w: usize,
+    border: Style,
+    dim: Style,
+}
 
+fn render_cmd_header(cmd: &str, title: Option<&str>, layout: &CardLayout) -> Vec<FormattedLine> {
     let top_border = match title {
-        Some(t) => box_titled_border('┌', t, '─', '┐', width, border),
-        None => box_border('┌', '─', '┐', width, border),
+        Some(t) => box_titled_border(t, layout.width, layout.border),
+        None => box_border(TOP_CAPS, layout.width, layout.border),
     };
-
     let mut lines = vec![FormattedLine {
         line: top_border,
         is_continuation: false,
     }];
-
-    // Command line
     let cmd_raw = format!("$ {}", cmd);
-    for (idx, wrapped) in wrap_ansi(&cmd_raw, inner_w).into_iter().enumerate() {
+    for (idx, wrapped) in wrap_ansi(&cmd_raw, layout.inner_w).into_iter().enumerate() {
         let mut spans = wrapped;
         if let Some(s) = spans.first_mut() {
             s.style = s.style.add_modifier(Modifier::BOLD);
         }
         lines.push(FormattedLine {
-            line: box_line(spans, border),
+            line: box_line(spans, layout.border),
             is_continuation: idx > 0,
         });
     }
-    lines.push(spacer());
+    lines.push(FormattedLine {
+        line: box_line(vec![Span::raw(" ".repeat(layout.inner_w))], layout.border),
+        is_continuation: false,
+    });
+    lines
+}
 
-    // Body with fixed visual tail to prevent bouncing
-    if block.lines.is_empty() {
-        lines.push(FormattedLine {
-            line: box_line(vec![Span::styled(pad_spaces("(no output)", inner_w), dim)], border),
+fn apply_tail_collapse(body: Vec<FormattedLine>, expanded: bool, layout: &CardLayout) -> Vec<FormattedLine> {
+    if body.len() <= TAIL_LINES {
+        return body;
+    }
+    let mut out = Vec::new();
+    if !expanded {
+        let hidden = body.len() - TAIL_LINES;
+        let hint = format!("... {} lines hidden (Ctrl+O to expand) ...", hidden);
+        out.push(FormattedLine {
+            line: box_line(
+                vec![Span::styled(pad_spaces(&hint, layout.inner_w), layout.dim)],
+                layout.border,
+            ),
             is_continuation: false,
         });
+        out.extend(body.into_iter().skip(hidden));
     } else {
-        let mut visual_body: Vec<FormattedLine> = Vec::new();
-        for l in &block.lines {
-            for (idx, wrapped) in wrap_ansi(l, inner_w).into_iter().enumerate() {
-                visual_body.push(FormattedLine {
-                    line: box_line(wrapped, border),
-                    is_continuation: idx > 0,
-                });
-            }
-        }
+        out.push(FormattedLine {
+            line: box_line(
+                vec![Span::styled(
+                    pad_spaces("(Ctrl+O to collapse)", layout.inner_w),
+                    layout.dim,
+                )],
+                layout.border,
+            ),
+            is_continuation: false,
+        });
+        out.extend(body);
+    }
+    out
+}
 
-        if !block.expanded && visual_body.len() > TAIL_LINES {
-            let hidden = visual_body.len() - TAIL_LINES;
-            let hint = format!("... {} lines hidden (Ctrl+O to expand) ...", hidden);
-            lines.push(FormattedLine {
-                line: box_line(vec![Span::styled(pad_spaces(&hint, inner_w), dim)], border),
-                is_continuation: false,
+fn render_output_body(block: &CommandOutputBlock, layout: &CardLayout) -> Vec<FormattedLine> {
+    if block.lines.is_empty() {
+        return vec![FormattedLine {
+            line: box_line(
+                vec![Span::styled(pad_spaces("(no output)", layout.inner_w), layout.dim)],
+                layout.border,
+            ),
+            is_continuation: false,
+        }];
+    }
+
+    let mut body = Vec::new();
+    for l in &block.lines {
+        for (idx, wrapped) in wrap_ansi(l, layout.inner_w).into_iter().enumerate() {
+            body.push(FormattedLine {
+                line: box_line(wrapped, layout.border),
+                is_continuation: idx > 0,
             });
-            lines.extend(visual_body.into_iter().skip(hidden));
-        } else {
-            if block.expanded && visual_body.len() > TAIL_LINES {
-                lines.push(FormattedLine {
-                    line: box_line(
-                        vec![Span::styled(pad_spaces("(Ctrl+O to collapse)", inner_w), dim)],
-                        border,
-                    ),
-                    is_continuation: false,
-                });
-            }
-            lines.extend(visual_body);
         }
     }
-    lines.push(spacer());
+    apply_tail_collapse(body, block.expanded, layout)
+}
 
-    // Exit code / Cancel
-    match block.status {
+fn format_status_line(status: &CommandStatus, inner_w: usize, border: Style) -> Option<FormattedLine> {
+    match status {
         CommandStatus::Failed(code) => {
             let msg = format!("Command exited with code {}", code);
-            lines.push(FormattedLine {
+            Some(FormattedLine {
                 line: box_line(
                     vec![Span::styled(
                         pad_spaces(&msg, inner_w),
@@ -152,88 +236,74 @@ pub fn render_command_block_with_title(
                     border,
                 ),
                 is_continuation: false,
-            });
-            lines.push(spacer());
+            })
         }
-        CommandStatus::Cancelled => {
-            lines.push(FormattedLine {
-                line: box_line(
-                    vec![Span::styled(
-                        pad_spaces("Command cancelled", inner_w),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    )],
-                    border,
-                ),
-                is_continuation: false,
-            });
-            lines.push(spacer());
-        }
-        _ => {}
+        CommandStatus::Cancelled => Some(FormattedLine {
+            line: box_line(
+                vec![Span::styled(
+                    pad_spaces("Command cancelled", inner_w),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )],
+                border,
+            ),
+            is_continuation: false,
+        }),
+        _ => None,
+    }
+}
+
+fn render_block_footer(block: &CommandOutputBlock, layout: &CardLayout) -> Vec<FormattedLine> {
+    let mut lines = vec![FormattedLine {
+        line: box_line(vec![Span::raw(" ".repeat(layout.inner_w))], layout.border),
+        is_continuation: false,
+    }];
+
+    if let Some(st_line) = format_status_line(&block.status, layout.inner_w, layout.border) {
+        lines.push(st_line);
+        lines.push(FormattedLine {
+            line: box_line(vec![Span::raw(" ".repeat(layout.inner_w))], layout.border),
+            is_continuation: false,
+        });
     }
 
-    // Took / Running line
     let dur = block.duration.unwrap_or_else(|| block.started_at.elapsed());
     let status_str = match block.status {
         CommandStatus::Running => format!("Running {:.1}s", dur.as_secs_f64()),
         _ => format!("Took {:.1}s", dur.as_secs_f64()),
     };
     lines.push(FormattedLine {
-        line: box_line(vec![Span::styled(pad_spaces(&status_str, inner_w), dim)], border),
+        line: box_line(
+            vec![Span::styled(pad_spaces(&status_str, layout.inner_w), layout.dim)],
+            layout.border,
+        ),
         is_continuation: false,
     });
     lines.push(FormattedLine {
-        line: box_border('└', '─', '┘', width, border),
+        line: box_border(BOTTOM_CAPS, layout.width, layout.border),
         is_continuation: false,
     });
     lines
 }
 
 pub fn render_command_output_block(block: &CommandOutputBlock, width: usize) -> Vec<FormattedLine> {
+    let color = match block.status {
+        CommandStatus::Running => Color::Yellow,
+        CommandStatus::Success(_) => Color::Green,
+        CommandStatus::Failed(_) => Color::Red,
+        CommandStatus::Cancelled => Color::DarkGray,
+    };
+    let layout = CardLayout {
+        width,
+        inner_w: width.saturating_sub(4),
+        border: Style::default().fg(color),
+        dim: Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+    };
+
     let title = block.tool.as_deref().map(|t| format!(" Tool: {} ", t));
-    render_command_block_with_title(title.as_deref(), &block.command, block, width)
-}
-
-fn render_text_card(
-    title: &str,
-    text: &str,
-    color: Color,
-    empty_hint: Option<&str>,
-    width: usize,
-) -> Vec<FormattedLine> {
-    let style = Style::default().fg(color);
-    let dim = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
-    let inner_w = width.saturating_sub(4);
-    let mut lines = vec![FormattedLine {
-        line: box_titled_border('┌', title, '─', '┐', width, style),
-        is_continuation: false,
-    }];
-    if text.trim().is_empty() {
-        let hint = empty_hint.unwrap_or("");
-        lines.push(FormattedLine {
-            line: box_line(vec![Span::styled(pad_spaces(hint, inner_w), dim)], style),
-            is_continuation: false,
-        });
-    } else {
-        for (idx, wrapped) in wrap_ansi(text, inner_w).into_iter().enumerate() {
-            lines.push(FormattedLine {
-                line: box_line(wrapped, style),
-                is_continuation: idx > 0,
-            });
-        }
-    }
-    lines.push(FormattedLine {
-        line: box_border('└', '─', '┘', width, style),
-        is_continuation: false,
-    });
+    let mut lines = render_cmd_header(&block.command, title.as_deref(), &layout);
+    lines.extend(render_output_body(block, &layout));
+    lines.extend(render_block_footer(block, &layout));
     lines
-}
-
-pub fn render_agent_thought_block(thought: &str, width: usize) -> Vec<FormattedLine> {
-    render_text_card(" Thought ", thought, Color::Magenta, Some("Thinking..."), width)
-}
-
-pub fn render_agent_response_block(response: &str, width: usize) -> Vec<FormattedLine> {
-    render_text_card(" Agent ", response, Color::Cyan, None, width)
 }
 
 #[cfg(test)]

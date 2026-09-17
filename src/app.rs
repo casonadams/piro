@@ -190,6 +190,12 @@ pub enum FeedItem {
     AgentResponse(String),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollBounds {
+    pub total: usize,
+    pub view: usize,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ScrollState {
     pub scroll_from_bottom: usize,
@@ -197,9 +203,9 @@ pub struct ScrollState {
 }
 
 impl ScrollState {
-    pub fn scroll_up(&mut self, delta: usize, total: usize, view: usize) {
-        if total > view {
-            self.scroll_from_bottom = (self.scroll_from_bottom + delta).min(total - view);
+    pub fn scroll_up(&mut self, delta: usize, bounds: ScrollBounds) {
+        if bounds.total > bounds.view {
+            self.scroll_from_bottom = (self.scroll_from_bottom + delta).min(bounds.total - bounds.view);
             self.auto_scroll = false;
         }
     }
@@ -470,8 +476,13 @@ impl App {
         self.cursor.line = self.cursor.line.saturating_sub(d);
         let (start, _) = self.scroll.visible_range(self.total_feed_lines, self.viewport_height);
         if self.cursor.line < start {
-            self.scroll
-                .scroll_up(start - self.cursor.line, self.total_feed_lines, self.viewport_height);
+            self.scroll.scroll_up(
+                start - self.cursor.line,
+                ScrollBounds {
+                    total: self.total_feed_lines,
+                    view: self.viewport_height,
+                },
+            );
         }
     }
 

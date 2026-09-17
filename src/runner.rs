@@ -68,12 +68,11 @@ fn spawn_stream<R: AsyncRead + Unpin + Send + 'static>(
     (task, abort)
 }
 
-pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> ProcessHandle {
-    let start = Instant::now();
+fn build_shell_command(cmd_str: &str) -> Command {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = Command::new(shell);
     cmd.arg("-c")
-        .arg(&cmd_str)
+        .arg(cmd_str)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -88,6 +87,12 @@ pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> P
 
     #[cfg(unix)]
     cmd.process_group(0);
+    cmd
+}
+
+pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> ProcessHandle {
+    let start = Instant::now();
+    let mut cmd = build_shell_command(&cmd_str);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

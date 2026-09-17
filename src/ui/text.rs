@@ -15,6 +15,43 @@ pub fn pad_spaces(s: &str, target_w: usize) -> String {
     }
 }
 
+struct WrapState {
+    target_w: usize,
+    cur: Vec<Span<'static>>,
+    cur_w: usize,
+    out: Vec<Vec<Span<'static>>>,
+}
+
+fn push_word(word: &str, style: ratatui::style::Style, st: &mut WrapState) {
+    let ww = str_width(word);
+    if st.cur_w + ww <= st.target_w {
+        st.cur.push(Span::styled(word.to_string(), style));
+        st.cur_w += ww;
+        return;
+    }
+    if st.cur_w > 0 {
+        st.cur.push(Span::raw(" ".repeat(st.target_w - st.cur_w)));
+        st.out.push(std::mem::take(&mut st.cur));
+        st.cur_w = 0;
+    }
+    let trimmed = word.trim_start();
+    let tw = str_width(trimmed);
+    if tw <= st.target_w {
+        st.cur.push(Span::styled(trimmed.to_string(), style));
+        st.cur_w = tw;
+    } else {
+        for c in trimmed.chars() {
+            let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+            if st.cur_w + cw > st.target_w {
+                st.out.push(std::mem::take(&mut st.cur));
+                st.cur_w = 0;
+            }
+            st.cur.push(Span::styled(c.to_string(), style));
+            st.cur_w += cw;
+        }
+    }
+}
+
 pub fn wrap_ansi(raw: &str, target_w: usize) -> Vec<Vec<Span<'static>>> {
     let spans: Vec<Span<'static>> = match raw.as_bytes().into_text() {
         Ok(t) => t
@@ -35,47 +72,23 @@ pub fn wrap_ansi(raw: &str, target_w: usize) -> Vec<Vec<Span<'static>>> {
         return vec![line];
     }
 
-    let mut out = Vec::new();
-    let mut cur = Vec::new();
-    let mut cur_w = 0;
+    let mut st = WrapState {
+        target_w,
+        cur: Vec::new(),
+        cur_w: 0,
+        out: Vec::new(),
+    };
 
     for span in spans {
-        let style = span.style;
         for word in span.content.split_inclusive(char::is_whitespace) {
-            let ww = str_width(word);
-            if cur_w + ww <= target_w {
-                cur.push(Span::styled(word.to_string(), style));
-                cur_w += ww;
-            } else {
-                if cur_w > 0 {
-                    cur.push(Span::raw(" ".repeat(target_w - cur_w)));
-                    out.push(std::mem::take(&mut cur));
-                    cur_w = 0;
-                }
-                let trimmed = word.trim_start();
-                let tw = str_width(trimmed);
-                if tw <= target_w {
-                    cur.push(Span::styled(trimmed.to_string(), style));
-                    cur_w = tw;
-                } else {
-                    for c in trimmed.chars() {
-                        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-                        if cur_w + cw > target_w {
-                            out.push(std::mem::take(&mut cur));
-                            cur_w = 0;
-                        }
-                        cur.push(Span::styled(c.to_string(), style));
-                        cur_w += cw;
-                    }
-                }
-            }
+            push_word(word, span.style, &mut st);
         }
     }
-    if cur_w > 0 {
-        cur.push(Span::raw(" ".repeat(target_w - cur_w)));
-        out.push(cur);
+    if st.cur_w > 0 {
+        st.cur.push(Span::raw(" ".repeat(target_w - st.cur_w)));
+        st.out.push(st.cur);
     }
-    out
+    st.out
 }
 
 #[cfg(test)]

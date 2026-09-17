@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::AbortHandle;
 
 pub use backend::{AgentBackend, AgentMessage, MockAgentBackend, StepResult};
-pub use tool::{Tool, ToolRegistry};
+pub use tool::{Tool, ToolRegistry, ToolResult};
 
 use crate::runner::ProcessHandle;
 
@@ -41,83 +41,129 @@ impl AgentHandle {
     }
 }
 
+pub struct AgentContext {
+    pub active_tool: Arc<Mutex<Option<ProcessHandle>>>,
+    pub agent_tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+pub struct AgentConfig<B> {
+    pub prompt: String,
+    pub backend: B,
+    pub registry: ToolRegistry,
+}
+
+async fn execute_agent_tool(tool: Arc<dyn Tool>, input: &str, ctx: &AgentContext) -> Option<ToolResult> {
+    let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+    let tool_run = tool.run(input, line_tx);
+    *ctx.active_tool.lock().await = Some(tool_run.handle);
+
+    let fwd = ctx.agent_tx.clone();
+    let fwd_task = tokio::spawn(async move {
+        while let Some(l) = line_rx.recv().await {
+            let _ = fwd.send(AgentEvent::ToolOutput(l));
+        }
+    });
+
+    let res = tool_run.result.await.ok();
+    let _ = fwd_task.await;
+    *ctx.active_tool.lock().await = None;
+
+    if let Some(r) = &res {
+        let _ = ctx.agent_tx.send(AgentEvent::ToolDone {
+            exit_code: r.exit_code,
+            duration: r.duration,
+        });
+    } else {
+        let _ = ctx.agent_tx.send(AgentEvent::Cancelled);
+    }
+    res
+}
+
+struct AgentLoopState<'a> {
+    registry: &'a ToolRegistry,
+    history: &'a mut Vec<AgentMessage>,
+}
+
+struct ToolCallRequest {
+    pub name: String,
+    pub input: String,
+}
+
+async fn dispatch_tool(call: ToolCallRequest, ctx: &AgentContext, st: &mut AgentLoopState<'_>) -> bool {
+    let _ = ctx.agent_tx.send(AgentEvent::ToolStart {
+        name: call.name.clone(),
+        input: call.input.clone(),
+    });
+    st.history.push(AgentMessage::ToolCall {
+        name: call.name.clone(),
+        input: call.input.clone(),
+    });
+    if let Some(t) = st.registry.get(&call.name) {
+        let Some(res) = execute_agent_tool(t, &call.input, ctx).await else {
+            return true;
+        };
+        st.history.push(AgentMessage::Observation {
+            output: res.output,
+            success: res.success,
+        });
+    } else {
+        let err = format!("Tool '{}' not found", call.name);
+        let _ = ctx.agent_tx.send(AgentEvent::Error(err.clone()));
+        st.history.push(AgentMessage::Observation {
+            output: err,
+            success: false,
+        });
+    }
+    false
+}
+
+async fn handle_agent_step(step: StepResult, ctx: &AgentContext, st: &mut AgentLoopState<'_>) -> bool {
+    match step {
+        StepResult::Thought(t) => {
+            let _ = ctx.agent_tx.send(AgentEvent::Thought(t.clone()));
+            st.history.push(AgentMessage::Thought(t));
+            false
+        }
+        StepResult::CallTool { tool: name, input } => dispatch_tool(ToolCallRequest { name, input }, ctx, st).await,
+        StepResult::FinalAnswer(ans) => {
+            st.history.push(AgentMessage::Response(ans.clone()));
+            let _ = ctx.agent_tx.send(AgentEvent::Response(ans));
+            true
+        }
+    }
+}
+
 pub fn spawn_agent<B: AgentBackend + 'static>(
-    prompt: String,
-    mut backend: B,
-    registry: ToolRegistry,
+    config: AgentConfig<B>,
     agent_tx: mpsc::UnboundedSender<AgentEvent>,
 ) -> AgentHandle {
     let active_tool = Arc::new(Mutex::new(None));
-    let tool_ref = active_tool.clone();
+    let ctx = AgentContext {
+        active_tool: active_tool.clone(),
+        agent_tx,
+    };
 
     let task = tokio::spawn(async move {
-        let _tools = registry.format_descriptions();
-        let mut history = vec![AgentMessage::User(prompt)];
+        let mut backend = config.backend;
+        let _tools = config.registry.format_descriptions();
+        let mut history = vec![AgentMessage::User(config.prompt)];
         for _ in 0..MAX_AGENT_STEPS {
             let next = match backend.next_step(&history).await {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = agent_tx.send(AgentEvent::Error(e));
+                    let _ = ctx.agent_tx.send(AgentEvent::Error(e));
                     break;
                 }
             };
-            match next {
-                StepResult::Thought(t) => {
-                    let _ = agent_tx.send(AgentEvent::Thought(t.clone()));
-                    history.push(AgentMessage::Thought(t));
-                }
-                StepResult::CallTool { tool: name, input } => {
-                    let _ = agent_tx.send(AgentEvent::ToolStart {
-                        name: name.clone(),
-                        input: input.clone(),
-                    });
-                    history.push(AgentMessage::ToolCall {
-                        name: name.clone(),
-                        input: input.clone(),
-                    });
-                    if let Some(t) = registry.get(&name) {
-                        let (line_tx, mut line_rx) = mpsc::unbounded_channel();
-                        let tool_run = t.run(&input, line_tx);
-                        *tool_ref.lock().await = Some(tool_run.handle);
-                        let fwd = agent_tx.clone();
-                        let fwd_task = tokio::spawn(async move {
-                            while let Some(l) = line_rx.recv().await {
-                                let _ = fwd.send(AgentEvent::ToolOutput(l));
-                            }
-                        });
-                        let Ok(res) = tool_run.result.await else {
-                            let _ = fwd_task.await;
-                            *tool_ref.lock().await = None;
-                            let _ = agent_tx.send(AgentEvent::Cancelled);
-                            return;
-                        };
-                        let _ = fwd_task.await;
-                        *tool_ref.lock().await = None;
-                        let _ = agent_tx.send(AgentEvent::ToolDone {
-                            exit_code: res.exit_code,
-                            duration: res.duration,
-                        });
-                        history.push(AgentMessage::Observation {
-                            output: res.output,
-                            success: res.success,
-                        });
-                    } else {
-                        let err = format!("Tool '{}' not found", name);
-                        let _ = agent_tx.send(AgentEvent::Error(err.clone()));
-                        history.push(AgentMessage::Observation {
-                            output: err,
-                            success: false,
-                        });
-                    }
-                }
-                StepResult::FinalAnswer(ans) => {
-                    history.push(AgentMessage::Response(ans.clone()));
-                    let _ = agent_tx.send(AgentEvent::Response(ans));
-                    break;
-                }
+            let mut st = AgentLoopState {
+                registry: &config.registry,
+                history: &mut history,
+            };
+            if handle_agent_step(next, &ctx, &mut st).await {
+                break;
             }
         }
-        let _ = agent_tx.send(AgentEvent::Finished);
+        let _ = ctx.agent_tx.send(AgentEvent::Finished);
     });
 
     AgentHandle {
@@ -142,7 +188,12 @@ mod tests {
             StepResult::FinalAnswer("Finished".into()),
         ]);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let _handle = spawn_agent("count files".into(), backend, registry, tx);
+        let config = AgentConfig {
+            prompt: "count files".into(),
+            backend,
+            registry,
+        };
+        let _handle = spawn_agent(config, tx);
 
         let mut events = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -170,7 +221,12 @@ mod tests {
             },
         ]);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handle = spawn_agent("task".into(), backend, registry, tx);
+        let config = AgentConfig {
+            prompt: "task".into(),
+            backend,
+            registry,
+        };
+        let handle = spawn_agent(config, tx);
         while let Some(ev) = rx.recv().await {
             if matches!(ev, AgentEvent::ToolStart { .. }) {
                 break;

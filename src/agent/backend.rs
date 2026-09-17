@@ -53,43 +53,45 @@ impl AgentBackend for MockAgentBackend {
             })
             .unwrap_or("");
 
-        let (tool_cmd, thought) = if prompt.contains("count") || prompt.contains("list") {
-            (Some("ls -1"), "Listing directory files...")
-        } else if prompt.contains("git") || prompt.contains("status") {
-            (Some("git status --short"), "Checking repository status...")
+        Ok(resolve_demo_step(prompt, history))
+    }
+}
+
+fn resolve_demo_step(prompt: &str, history: &[AgentMessage]) -> StepResult {
+    let (tool_cmd, thought) = if prompt.contains("count") || prompt.contains("list") {
+        (Some("ls -1"), "Listing directory files...")
+    } else if prompt.contains("git") || prompt.contains("status") {
+        (Some("git status --short"), "Checking repository status...")
+    } else {
+        (None, "Analyzing request...")
+    };
+
+    if !history.iter().any(|m| matches!(m, AgentMessage::Thought(_))) {
+        return StepResult::Thought(thought.into());
+    }
+
+    if let Some((output, ok)) = history.iter().rev().find_map(|m| match m {
+        AgentMessage::Observation { output, success } => Some((output.clone(), *success)),
+        _ => None,
+    }) {
+        let msg = if ok {
+            format!(
+                "Observation processed successfully ({} lines):\n{}",
+                output.lines().count(),
+                output
+            )
         } else {
-            (None, "Analyzing request...")
+            format!("Tool execution failed:\n{}", output)
         };
+        return StepResult::FinalAnswer(msg);
+    }
 
-        let has_thought = history.iter().any(|m| matches!(m, AgentMessage::Thought(_)));
-        if !has_thought {
-            return Ok(StepResult::Thought(thought.into()));
-        }
-
-        let last_obs = history.iter().rev().find_map(|m| match m {
-            AgentMessage::Observation { output, success } => Some((output.clone(), *success)),
-            _ => None,
-        });
-
-        if let Some((output, ok)) = last_obs {
-            return Ok(StepResult::FinalAnswer(if ok {
-                format!(
-                    "Observation processed successfully ({} lines):\n{}",
-                    output.lines().count(),
-                    output
-                )
-            } else {
-                format!("Tool execution failed:\n{}", output)
-            }));
-        }
-
-        match tool_cmd {
-            Some(cmd) => Ok(StepResult::CallTool {
-                tool: "bash".into(),
-                input: cmd.into(),
-            }),
-            None => Ok(StepResult::FinalAnswer(format!("Processed: '{}'", prompt))),
-        }
+    match tool_cmd {
+        Some(cmd) => StepResult::CallTool {
+            tool: "bash".into(),
+            input: cmd.into(),
+        },
+        None => StepResult::FinalAnswer(format!("Processed: '{}'", prompt)),
     }
 }
 

@@ -22,6 +22,39 @@ pub fn format_feed_item(item: &FeedItem, width: usize) -> Vec<FormattedLine> {
     }
 }
 
+pub fn format_entire_feed(feed: &[FeedItem], width: usize) -> Vec<FormattedLine> {
+    let mut formatted = Vec::new();
+    for item in feed {
+        formatted.extend(format_feed_item(item, width));
+        formatted.push(FormattedLine {
+            line: Line::from(""),
+            is_continuation: false,
+        });
+    }
+    formatted
+}
+
+struct ScrollView<'a> {
+    app: &'a App,
+    start: usize,
+    pad: usize,
+    area: Rect,
+}
+
+fn render_scroll_cursor(frame: &mut Frame, view: &ScrollView, end: usize) {
+    if view.app.mode != Mode::Scroll {
+        return;
+    }
+    if view.app.normalized_selection().is_some() {
+        apply_doc_selection(frame.buffer_mut(), view);
+    }
+    if view.app.cursor.line >= view.start && view.app.cursor.line < end {
+        let row = view.area.y + (view.pad + (view.app.cursor.line - view.start)) as u16;
+        let col = view.area.x + view.app.cursor.col.min(view.area.width.saturating_sub(1));
+        frame.set_cursor_position(Position::new(col, row));
+    }
+}
+
 pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
     let view_h = area.height as usize;
     app.viewport_height = view_h;
@@ -39,23 +72,10 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let mut formatted = Vec::new();
-    for item in &app.feed {
-        formatted.extend(format_feed_item(item, width));
-        formatted.push(FormattedLine {
-            line: Line::from(""),
-            is_continuation: false,
-        });
-    }
-
+    let formatted = format_entire_feed(&app.feed, width);
     app.total_feed_lines = formatted.len();
     let (start, end) = app.scroll.visible_range(formatted.len(), view_h);
-    let mut visible: Vec<Line<'static>> = formatted
-        .iter()
-        .skip(start)
-        .take(end - start)
-        .map(|fl| fl.line.clone())
-        .collect();
+    let visible: Vec<Line<'static>> = formatted[start..end].iter().map(|fl| fl.line.clone()).collect();
 
     let count = visible.len();
     let pad = if count < view_h && app.scroll.auto_scroll {
@@ -64,51 +84,38 @@ pub fn draw_feed(frame: &mut Frame, area: Rect, app: &mut App) {
         0
     };
 
-    if pad > 0 {
-        let mut padded = vec![Line::from(""); pad];
-        padded.extend(visible);
-        visible = padded;
-    }
+    let mut padded = vec![Line::from(""); pad];
+    padded.extend(visible);
+    frame.render_widget(Paragraph::new(padded), area);
 
-    frame.render_widget(Paragraph::new(visible), area);
-
-    if app.mode == Mode::Scroll {
-        if app.normalized_selection().is_some() {
-            apply_doc_selection(frame.buffer_mut(), app, start, pad, area);
-        }
-
-        if app.cursor.line >= start && app.cursor.line < end {
-            let row = area.y + (pad + (app.cursor.line - start)) as u16;
-            let col = area.x + app.cursor.col.min(area.width.saturating_sub(1));
-            frame.set_cursor_position(Position::new(col, row));
-        }
-    }
+    let view = ScrollView { app, start, pad, area };
+    render_scroll_cursor(frame, &view, end);
 }
 
-fn apply_doc_selection(buf: &mut Buffer, app: &App, start_line: usize, pad: usize, area: Rect) {
-    let Some((sel_start, sel_end)) = app.normalized_selection() else {
+fn apply_doc_selection(buf: &mut Buffer, view: &ScrollView) {
+    let Some((sel_start, sel_end)) = view.app.normalized_selection() else {
         return;
     };
-    let right = area.right().saturating_sub(1);
+    let right = view.area.right().saturating_sub(1);
 
-    for (row_idx, line_num) in (start_line..).enumerate() {
-        let screen_row = area.y + (pad + row_idx) as u16;
-        if screen_row >= area.bottom() {
+    for (row_idx, line_num) in (view.start..).enumerate() {
+        let screen_row = view.area.y + (view.pad + row_idx) as u16;
+        if screen_row >= view.area.bottom() {
             break;
         }
 
         if line_num >= sel_start.line && line_num <= sel_end.line {
-            let (col_start, col_end) = match app.selection_type {
-                SelectionType::Line => (area.x, right),
+            let (col_start, col_end) = match view.app.selection_type {
+                SelectionType::Line => (view.area.x, right),
                 SelectionType::Char => {
                     if sel_start.line == sel_end.line {
                         (sel_start.col.min(sel_end.col), sel_start.col.max(sel_end.col))
                     } else if line_num == sel_start.line {
                         (sel_start.col, right)
                     } else if line_num == sel_end.line {
-                        (area.x, sel_end.col)
+                        (view.area.x, sel_end.col)
                     } else {
-                        (area.x, right)
+                        (view.area.x, right)
                     }
                 }
             };
@@ -122,61 +129,58 @@ fn apply_doc_selection(buf: &mut Buffer, app: &App, start_line: usize, pad: usiz
     }
 }
 
-pub fn extract_selected_text(app: &App, width: usize) -> String {
-    let mut all_formatted = Vec::new();
-    for item in &app.feed {
-        all_formatted.extend(format_feed_item(item, width));
-        all_formatted.push(FormattedLine {
-            line: Line::from(""),
-            is_continuation: false,
-        });
+fn slice_char_selection(cleaned: &str, sel_start: &crate::app::DocPos, sel_end: &crate::app::DocPos) -> String {
+    let start_col = (sel_start.col.min(sel_end.col) as usize).saturating_sub(2);
+    let end_col = (sel_start.col.max(sel_end.col) as usize).saturating_sub(2);
+    let chars: Vec<char> = cleaned.chars().collect();
+    if start_col < chars.len() {
+        chars[start_col..end_col.min(chars.len())].iter().collect()
+    } else {
+        cleaned.to_string()
     }
+}
 
+pub fn extract_selected_text(app: &App, width: usize) -> String {
+    let all_formatted = format_entire_feed(&app.feed, width);
     let (sel_start, sel_end) = app.normalized_selection().unwrap_or((app.cursor, app.cursor));
     let start_idx = sel_start.line.min(all_formatted.len());
     let end_limit = (sel_end.line + 1).min(all_formatted.len());
 
     let mut out = String::new();
-    if start_idx < end_limit {
-        for (offset, item) in all_formatted[start_idx..end_limit].iter().enumerate() {
-            let line_idx = start_idx + offset;
-            let raw: String = item.line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let cleaned = clean_scraped_line(&raw);
-            if cleaned.is_empty() {
-                continue;
-            }
-
-            let snippet = if app.selection_type == SelectionType::Char && sel_start.line == sel_end.line {
-                let start_col = (sel_start.col.min(sel_end.col) as usize).saturating_sub(2);
-                let end_col = (sel_start.col.max(sel_end.col) as usize).saturating_sub(2);
-                let chars: Vec<char> = cleaned.chars().collect();
-                if start_col < chars.len() {
-                    chars[start_col..end_col.min(chars.len())].iter().collect()
-                } else {
-                    cleaned
-                }
-            } else {
-                cleaned
-            };
-
-            if snippet.is_empty() {
-                continue;
-            }
-
-            if item.is_continuation && line_idx > start_idx {
-                if !out.is_empty() && !out.ends_with(' ') {
-                    out.push(' ');
-                }
-                out.push_str(&snippet);
-            } else {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&snippet);
-            }
-        }
+    if start_idx >= end_limit {
+        return out;
     }
 
+    for (offset, item) in all_formatted[start_idx..end_limit].iter().enumerate() {
+        let line_idx = start_idx + offset;
+        let raw: String = item.line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let cleaned = clean_scraped_line(&raw);
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        let snippet = if app.selection_type == SelectionType::Char && sel_start.line == sel_end.line {
+            slice_char_selection(&cleaned, &sel_start, &sel_end)
+        } else {
+            cleaned
+        };
+
+        if snippet.is_empty() {
+            continue;
+        }
+
+        if item.is_continuation && line_idx > start_idx {
+            if !out.is_empty() && !out.ends_with(' ') {
+                out.push(' ');
+            }
+            out.push_str(&snippet);
+        } else {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&snippet);
+        }
+    }
     out
 }
 
@@ -256,14 +260,7 @@ mod tests {
         app.feed.push(FeedItem::AgentResponse("Final answer here".into()));
 
         let width = 40;
-        let mut formatted = Vec::new();
-        for item in &app.feed {
-            formatted.extend(format_feed_item(item, width));
-            formatted.push(FormattedLine {
-                line: Line::from(""),
-                is_continuation: false,
-            });
-        }
+        let formatted = format_entire_feed(&app.feed, width);
 
         app.total_feed_lines = formatted.len();
         app.enter_scroll_mode();
