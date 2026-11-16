@@ -315,6 +315,7 @@ mod tests {
     fn test_render_tool_command_output_block() {
         let width = 50;
         let block = CommandOutputBlock {
+            call_id: None,
             command: "echo test".into(),
             tool: Some("bash".into()),
             status: CommandStatus::Success(0),

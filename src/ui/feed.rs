@@ -210,6 +210,7 @@ mod tests {
         let long_line =
             "This is a very long line that will definitely exceed forty characters and wrap without soft line breaks";
         app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
+            call_id: None,
             command: "echo test".into(),
             tool: None,
             status: CommandStatus::Success(0),
@@ -245,6 +246,7 @@ mod tests {
         let mut app = App::default();
         app.feed.push(FeedItem::AgentThought("Reasoning about solution".into()));
         app.feed.push(FeedItem::CommandOutput(CommandOutputBlock {
+            call_id: None,
             command: "echo test".into(),
             tool: Some("bash".into()),
             status: CommandStatus::Success(0),

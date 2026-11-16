@@ -91,6 +91,7 @@ fn build_shell_command(cmd_str: &str) -> Command {
 }
 
 pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> ProcessHandle {
+    let _runtime = crate::sys::runtime().enter();
     let start = Instant::now();
     let mut cmd = build_shell_command(&cmd_str);
 

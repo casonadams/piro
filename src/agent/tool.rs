@@ -12,6 +12,12 @@ pub struct ToolResult {
     pub duration: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolExit {
+    pub code: Option<i32>,
+    pub duration: Duration,
+}
+
 pub struct ToolRun {
     pub handle: ProcessHandle,
     pub result: JoinHandle<ToolResult>,
@@ -38,7 +44,7 @@ impl Tool for BashTool {
     fn run(&self, args: &str, line_tx: mpsc::UnboundedSender<String>) -> ToolRun {
         let (proc_tx, mut proc_rx) = mpsc::unbounded_channel::<RunnerMsg>();
         let handle = spawn_command(args.to_string(), proc_tx);
-        let result = tokio::spawn(async move {
+        let result = crate::sys::runtime().spawn(async move {
             let (mut lines, mut exit_code, mut duration) = (Vec::new(), None, Duration::ZERO);
             while let Some(msg) = proc_rx.recv().await {
                 match msg {

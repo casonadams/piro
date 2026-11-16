@@ -12,7 +12,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentConfig, AgentEvent, AgentHandle, AgentMessage, ToolRegistry, spawn_agent};
+use crate::agent::tool::ToolExit;
+use crate::agent::{AgentEvent, AgentHandle, AgentMessage, EngineSpawnOptions, ReActEngine, ToolCall, ToolRegistry};
 use crate::sys::ProcessHandle;
 
 #[derive(Debug, Default, Clone)]
@@ -47,7 +48,7 @@ impl App {
         let model_spec = options
             .model_spec
             .or_else(|| std::env::var("PIRO_MODEL").ok())
-            .unwrap_or_else(|| "ollama/ornith-1.5:35b".into());
+            .unwrap_or_else(|| crate::provider::DEFAULT_MODEL_SPEC.into());
 
         let mut app = Self {
             running: true,
@@ -146,25 +147,37 @@ impl App {
 
     pub fn add_agent_prompt(&mut self, prompt: String, handle: AgentHandle) {
         self.record_history(&prompt);
-        self.agent_history.push(AgentMessage::User(prompt.clone()));
         self.feed.push(FeedItem::UserInput(prompt));
         self.active_agent = Some(handle);
         self.scroll_to_bottom();
     }
 
     pub fn spawn_agent_prompt(&mut self, prompt: String, agent_tx: &mpsc::UnboundedSender<AgentEvent>) {
-        let registry = ToolRegistry::with_defaults();
-        let backend = crate::provider::create_backend(&self.model_spec, &registry)
-            .unwrap_or_else(|_| crate::provider::default_backend(&registry))
-            .with_delta_tx(agent_tx.clone());
-        let config = AgentConfig {
-            prompt: prompt.clone(),
-            backend,
-            registry,
-            history: self.agent_history.clone(),
+        let provider = match crate::provider::provider_from_spec(&self.model_spec) {
+            Ok(p) => p,
+            Err(e) => {
+                self.feed.push(FeedItem::AgentResponse(format!("Error: {}", e)));
+                return;
+            }
         };
-        let handle = spawn_agent(config, agent_tx.clone());
+        let handle = ReActEngine::new(provider, ToolRegistry::with_defaults()).spawn_with_options(EngineSpawnOptions {
+            prompt: prompt.clone(),
+            history: self.agent_history.clone(),
+            agent_tx: agent_tx.clone(),
+        });
         self.add_agent_prompt(prompt, handle);
+    }
+
+    pub fn commit_agent_message(&mut self, msg: AgentMessage) {
+        if let AgentMessage::Assistant(turn) = &msg {
+            if let Some(thinking) = &turn.thinking {
+                self.add_agent_thought(thinking.text.clone());
+            }
+            if let Some(text) = &turn.text {
+                self.add_agent_response(text.clone());
+            }
+        }
+        self.agent_history.push(msg);
     }
 
     pub fn clear_feed_and_agent_context(&mut self) {
@@ -234,10 +247,30 @@ impl App {
         self.set_slot(true, thought);
     }
 
-    pub fn start_agent_tool(&mut self, name: String, input: String) {
-        self.feed
-            .push(FeedItem::CommandOutput(CommandOutputBlock::new(input, Some(name))));
+    pub fn start_agent_tool(&mut self, call: ToolCall) {
+        let mut block = CommandOutputBlock::new(call.input, Some(call.name));
+        block.call_id = Some(call.id);
+        self.feed.push(FeedItem::CommandOutput(block));
         self.scroll_to_bottom();
+    }
+
+    fn tool_block_mut(&mut self, call_id: &str) -> Option<&mut CommandOutputBlock> {
+        self.feed.iter_mut().rev().find_map(|item| match item {
+            FeedItem::CommandOutput(b) if b.call_id.as_deref() == Some(call_id) => Some(b),
+            _ => None,
+        })
+    }
+
+    pub fn append_tool_line(&mut self, call_id: &str, line: String) {
+        if let Some(b) = self.tool_block_mut(call_id) {
+            b.push_line(line);
+        }
+    }
+
+    pub fn complete_tool(&mut self, call_id: &str, exit: ToolExit) {
+        if let Some(b) = self.tool_block_mut(call_id) {
+            b.complete(exit);
+        }
     }
 
     pub fn add_agent_response(&mut self, response: String) {
@@ -250,22 +283,14 @@ impl App {
 
     pub fn append_output_line(&mut self, line: String) {
         if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
-            if b.lines.len() >= 5000 {
-                b.lines.remove(0);
-            }
-            b.lines.push(line);
+            b.push_line(line);
         }
     }
 
-    pub fn complete_command(&mut self, code: Option<i32>, dur: Duration) {
+    pub fn complete_command(&mut self, code: Option<i32>, duration: Duration) {
         self.active_process = None;
         if let Some(FeedItem::CommandOutput(b)) = self.feed.last_mut() {
-            b.duration = Some(dur);
-            b.status = match code {
-                Some(0) => CommandStatus::Success(0),
-                Some(c) => CommandStatus::Failed(c),
-                None => CommandStatus::Failed(-1),
-            };
+            b.complete(ToolExit { code, duration });
         }
     }
 
@@ -478,8 +503,8 @@ mod tests {
         assert!(app.agent_history.is_empty());
         let h = AgentHandle::mock(tokio::spawn(async {}).abort_handle());
         app.add_agent_prompt("test prompt".into(), h);
-        assert_eq!(app.agent_history.len(), 1);
-        assert_eq!(app.agent_history[0], AgentMessage::User("test prompt".into()));
+        app.commit_agent_message(AgentMessage::User("test prompt".into()));
+        assert_eq!(app.agent_history, vec![AgentMessage::User("test prompt".into())]);
 
         app.clear_feed_and_agent_context();
         assert!(app.agent_history.is_empty());

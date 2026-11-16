@@ -1,36 +1,43 @@
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-use crate::agent::backend::{AgentBackend, AgentMessage, StepResult};
-use crate::agent::tool::{Tool, ToolRegistry, ToolResult};
+use crate::agent::message::{AgentMessage, AssistantTurn, ToolCall, close_dangling_tool_calls};
+use crate::agent::tool::{ToolDefinition, ToolExit, ToolRegistry, ToolResult};
+use crate::provider::{ChatRequestParams, LlmProvider};
 use crate::sys::ProcessHandle;
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    Thought(String),
     ThoughtDelta(String),
-    ToolStart { name: String, input: String },
-    ToolOutput(String),
-    ToolDone { exit_code: Option<i32>, duration: Duration },
-    Response(String),
     ResponseDelta(String),
+    ToolStart(ToolCall),
+    ToolOutput {
+        call_id: String,
+        line: String,
+    },
+    ToolDone {
+        call_id: String,
+        exit: ToolExit,
+    },
+    /// A message the engine appended to the conversation; the session mirrors these.
+    Committed(AgentMessage),
+    Notice(String),
     Finished,
     Cancelled,
     Error(String),
 }
 
+type ActiveTool = Arc<Mutex<Option<ProcessHandle>>>;
+
 pub struct AgentHandle {
     abort_handle: AbortHandle,
-    active_tool: Arc<Mutex<Option<ProcessHandle>>>,
+    active_tool: ActiveTool,
 }
 
 impl AgentHandle {
     pub fn cancel(&self) {
-        if let Ok(mut lock) = self.active_tool.try_lock()
-            && let Some(mut h) = lock.take()
-        {
+        if let Some(mut h) = self.active_tool.lock().unwrap_or_else(PoisonError::into_inner).take() {
             h.kill();
         }
         self.abort_handle.abort();
@@ -40,24 +47,18 @@ impl AgentHandle {
     pub fn mock(abort_handle: AbortHandle) -> Self {
         Self {
             abort_handle,
-            active_tool: Arc::new(Mutex::new(None)),
+            active_tool: Arc::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCallRequest {
-    pub name: String,
-    pub input: String,
 }
 
 pub trait ReActHooks: Send + Sync + 'static {
     fn before_step(&mut self, _history: &[AgentMessage]) {}
     fn on_thought(&mut self, _thought: &str) {}
-    fn before_tool(&mut self, _call: &ToolCallRequest) -> bool {
+    fn before_tool(&mut self, _call: &ToolCall) -> bool {
         true
     }
-    fn after_tool(&mut self, _call: &ToolCallRequest, _result: &ToolResult) {}
+    fn after_tool(&mut self, _call: &ToolCall, _result: &ToolResult) {}
     fn on_complete(&mut self, _response: &str) {}
 }
 
@@ -65,44 +66,6 @@ pub trait ReActHooks: Send + Sync + 'static {
 pub struct NoopHooks;
 
 impl ReActHooks for NoopHooks {}
-
-pub struct AgentContext {
-    pub active_tool: Arc<Mutex<Option<ProcessHandle>>>,
-    pub agent_tx: mpsc::UnboundedSender<AgentEvent>,
-}
-
-async fn execute_tool_run(tool: Arc<dyn Tool>, input: &str, ctx: &AgentContext) -> Option<ToolResult> {
-    let (line_tx, mut line_rx) = mpsc::unbounded_channel();
-    let tool_run = tool.run(input, line_tx);
-    *ctx.active_tool.lock().await = Some(tool_run.handle);
-
-    let fwd = ctx.agent_tx.clone();
-    let fwd_task = tokio::spawn(async move {
-        while let Some(l) = line_rx.recv().await {
-            let _ = fwd.send(AgentEvent::ToolOutput(l));
-        }
-    });
-
-    let res = tool_run.result.await.ok();
-    let _ = fwd_task.await;
-    *ctx.active_tool.lock().await = None;
-
-    if let Some(r) = &res {
-        let _ = ctx.agent_tx.send(AgentEvent::ToolDone {
-            exit_code: r.exit_code,
-            duration: r.duration,
-        });
-    } else {
-        let _ = ctx.agent_tx.send(AgentEvent::Cancelled);
-    }
-    res
-}
-
-struct EngineLoopState<'a, H> {
-    registry: &'a ToolRegistry,
-    hooks: &'a mut H,
-    history: &'a mut Vec<AgentMessage>,
-}
 
 const MAX_OBSERVATION_LINES: usize = 200;
 const HEAD_LINES: usize = 120;
@@ -122,91 +85,6 @@ pub fn truncate_observation_output(output: &str) -> String {
     truncated.join("\n")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoopAction {
-    Continue,
-    Finish,
-}
-
-async fn dispatch_tool<H: ReActHooks>(
-    call: ToolCallRequest,
-    ctx: &AgentContext,
-    st: &mut EngineLoopState<'_, H>,
-) -> LoopAction {
-    if !st.hooks.before_tool(&call) {
-        let msg = format!("Tool '{}' blocked by policy", call.name);
-        let _ = ctx.agent_tx.send(AgentEvent::Error(msg.clone()));
-        st.history.push(AgentMessage::Observation {
-            output: msg,
-            success: false,
-        });
-        return LoopAction::Continue;
-    }
-
-    let _ = ctx.agent_tx.send(AgentEvent::ToolStart {
-        name: call.name.clone(),
-        input: call.input.clone(),
-    });
-    st.history.push(AgentMessage::ToolCall {
-        name: call.name.clone(),
-        input: call.input.clone(),
-    });
-
-    let Some(t) = st.registry.get(&call.name) else {
-        let err = format!("Tool '{}' not found", call.name);
-        let _ = ctx.agent_tx.send(AgentEvent::Error(err.clone()));
-        st.history.push(AgentMessage::Observation {
-            output: err,
-            success: false,
-        });
-        return LoopAction::Continue;
-    };
-
-    let Some(res) = execute_tool_run(t, &call.input, ctx).await else {
-        return LoopAction::Finish;
-    };
-    st.hooks.after_tool(&call, &res);
-    st.history.push(AgentMessage::Observation {
-        output: truncate_observation_output(&res.output),
-        success: res.success,
-    });
-    LoopAction::Continue
-}
-
-async fn handle_engine_step<H: ReActHooks>(
-    step: StepResult,
-    ctx: &AgentContext,
-    st: &mut EngineLoopState<'_, H>,
-) -> LoopAction {
-    match step {
-        StepResult::Thought(t) => {
-            st.hooks.on_thought(&t);
-            let _ = ctx.agent_tx.send(AgentEvent::Thought(t.clone()));
-            st.history.push(AgentMessage::Thought(t));
-            LoopAction::Continue
-        }
-        StepResult::CallTool { tool: name, input } => dispatch_tool(ToolCallRequest { name, input }, ctx, st).await,
-        StepResult::FinalAnswer(ans) => {
-            st.hooks.on_complete(&ans);
-            st.history.push(AgentMessage::Response(ans.clone()));
-            let _ = ctx.agent_tx.send(AgentEvent::Response(ans));
-            LoopAction::Finish
-        }
-    }
-}
-
-pub struct ReActEngine<B, H = NoopHooks> {
-    pub backend: B,
-    pub registry: ToolRegistry,
-    pub hooks: H,
-}
-
-impl<B: AgentBackend + 'static> ReActEngine<B, NoopHooks> {
-    pub fn new(backend: B, registry: ToolRegistry) -> Self {
-        Self::with_hooks(backend, registry, NoopHooks)
-    }
-}
-
 pub const DEFAULT_MAX_AGENT_STEPS: usize = 1000;
 
 pub fn resolved_max_steps() -> Option<usize> {
@@ -217,19 +95,6 @@ pub fn resolved_max_steps() -> Option<usize> {
         },
         Err(_) => Some(DEFAULT_MAX_AGENT_STEPS),
     }
-}
-
-pub struct EngineSpawnOptions {
-    pub prompt: String,
-    pub history: Vec<AgentMessage>,
-    pub agent_tx: mpsc::UnboundedSender<AgentEvent>,
-}
-
-struct EngineRunParams<B, H> {
-    backend: B,
-    registry: ToolRegistry,
-    hooks: H,
-    history: Vec<AgentMessage>,
 }
 
 #[derive(Default)]
@@ -249,76 +114,198 @@ impl RepetitionGuard {
             false
         }
     }
+
+    fn first_repetitive<'a>(&mut self, calls: &'a [ToolCall]) -> Option<&'a ToolCall> {
+        calls.iter().find(|c| self.is_repetitive(&c.name, &c.input))
+    }
 }
 
-async fn run_engine_loop<B: AgentBackend, H: ReActHooks>(mut p: EngineRunParams<B, H>, ctx: AgentContext) {
-    let max_steps = resolved_max_steps();
-    let mut steps_taken = 0;
-    let mut guard = RepetitionGuard::default();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopAction {
+    Continue,
+    Finish,
+}
 
-    loop {
-        if let Some(limit) = max_steps
-            && steps_taken >= limit
-        {
-            let msg = format!("Reached maximum step limit ({} steps).", limit);
-            let _ = ctx.agent_tx.send(AgentEvent::Response(msg));
-            break;
+struct EngineState<P, H> {
+    provider: P,
+    registry: ToolRegistry,
+    tools: Vec<ToolDefinition>,
+    hooks: H,
+    history: Vec<AgentMessage>,
+    active_tool: ActiveTool,
+    agent_tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+impl<P: LlmProvider, H: ReActHooks> EngineState<P, H> {
+    fn emit(&self, event: AgentEvent) {
+        let _ = self.agent_tx.send(event);
+    }
+
+    fn commit(&mut self, msg: AgentMessage) {
+        self.emit(AgentEvent::Committed(msg.clone()));
+        self.history.push(msg);
+    }
+
+    fn reject(&mut self, call: ToolCall, msg: String) -> LoopAction {
+        self.emit(AgentEvent::Error(msg.clone()));
+        self.commit(AgentMessage::ToolResult {
+            call_id: call.id,
+            output: msg,
+            success: false,
+        });
+        LoopAction::Continue
+    }
+
+    async fn request_turn(&mut self) -> Result<AssistantTurn, String> {
+        self.hooks.before_step(&self.history);
+        self.provider
+            .chat_stream(ChatRequestParams {
+                history: &self.history,
+                tools: &self.tools,
+                delta_tx: Some(&self.agent_tx),
+            })
+            .await
+    }
+
+    async fn execute(&self, call: &ToolCall) -> Option<ToolResult> {
+        let tool = self.registry.get(&call.name)?;
+        let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+        let run = tool.run(&call.input, line_tx);
+        *self.active_tool.lock().unwrap_or_else(PoisonError::into_inner) = Some(run.handle);
+        while let Some(line) = line_rx.recv().await {
+            self.emit(AgentEvent::ToolOutput {
+                call_id: call.id.clone(),
+                line,
+            });
         }
-        steps_taken += 1;
-        p.hooks.before_step(&p.history);
-        let next = match p.backend.next_step(&p.history).await {
-            Ok(s) => s,
+        let result = run.result.await.ok();
+        self.active_tool.lock().unwrap_or_else(PoisonError::into_inner).take();
+        result
+    }
+
+    async fn dispatch_tool(&mut self, call: ToolCall) -> LoopAction {
+        if !self.hooks.before_tool(&call) {
+            let msg = format!("Tool '{}' blocked by policy", call.name);
+            return self.reject(call, msg);
+        }
+        if self.registry.get(&call.name).is_none() {
+            let msg = format!("Tool '{}' not found", call.name);
+            return self.reject(call, msg);
+        }
+        self.emit(AgentEvent::ToolStart(call.clone()));
+        let Some(res) = self.execute(&call).await else {
+            self.emit(AgentEvent::Cancelled);
+            return LoopAction::Finish;
+        };
+        self.emit(AgentEvent::ToolDone {
+            call_id: call.id.clone(),
+            exit: ToolExit {
+                code: res.exit_code,
+                duration: res.duration,
+            },
+        });
+        self.hooks.after_tool(&call, &res);
+        self.commit(AgentMessage::ToolResult {
+            call_id: call.id,
+            output: truncate_observation_output(&res.output),
+            success: res.success,
+        });
+        LoopAction::Continue
+    }
+
+    async fn step(&mut self, guard: &mut RepetitionGuard) -> LoopAction {
+        let turn = match self.request_turn().await {
+            Ok(turn) => turn,
             Err(e) => {
-                let _ = ctx.agent_tx.send(AgentEvent::Error(e));
-                break;
+                self.emit(AgentEvent::Error(e));
+                return LoopAction::Finish;
             }
         };
-        if let StepResult::CallTool { ref tool, ref input } = next
-            && guard.is_repetitive(tool, input)
-        {
-            let msg = format!("Terminated repetitive loop: tool '{}' called repeatedly.", tool);
-            let _ = ctx.agent_tx.send(AgentEvent::Response(msg.clone()));
-            p.history.push(AgentMessage::Response(msg));
-            break;
+        if let Some(call) = guard.first_repetitive(&turn.tool_calls) {
+            let msg = format!("Terminated repetitive loop: tool '{}' called repeatedly.", call.name);
+            self.emit(AgentEvent::Notice(msg));
+            return LoopAction::Finish;
         }
-        let mut st = EngineLoopState {
-            registry: &p.registry,
-            hooks: &mut p.hooks,
-            history: &mut p.history,
-        };
-        if handle_engine_step(next, &ctx, &mut st).await == LoopAction::Finish {
-            break;
+        if let Some(thinking) = &turn.thinking {
+            self.hooks.on_thought(&thinking.text);
         }
+        let calls = turn.tool_calls.clone();
+        if calls.is_empty() {
+            self.hooks.on_complete(turn.text.as_deref().unwrap_or_default());
+        }
+        self.commit(AgentMessage::Assistant(turn));
+        if calls.is_empty() {
+            return LoopAction::Finish;
+        }
+        for call in calls {
+            if self.dispatch_tool(call).await == LoopAction::Finish {
+                return LoopAction::Finish;
+            }
+        }
+        LoopAction::Continue
     }
-    let _ = ctx.agent_tx.send(AgentEvent::Finished);
+
+    async fn run(mut self) {
+        let max_steps = resolved_max_steps();
+        let mut guard = RepetitionGuard::default();
+        let mut steps_taken = 0;
+        loop {
+            if max_steps.is_some_and(|limit| steps_taken >= limit) {
+                let msg = format!("Reached maximum step limit ({} steps).", steps_taken);
+                self.emit(AgentEvent::Notice(msg));
+                break;
+            }
+            steps_taken += 1;
+            if self.step(&mut guard).await == LoopAction::Finish {
+                break;
+            }
+        }
+        self.emit(AgentEvent::Finished);
+    }
 }
 
-impl<B: AgentBackend + 'static, H: ReActHooks> ReActEngine<B, H> {
-    pub fn with_hooks(backend: B, registry: ToolRegistry, hooks: H) -> Self {
+pub struct EngineSpawnOptions {
+    pub prompt: String,
+    pub history: Vec<AgentMessage>,
+    pub agent_tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+pub struct ReActEngine<P, H = NoopHooks> {
+    pub provider: P,
+    pub registry: ToolRegistry,
+    pub hooks: H,
+}
+
+impl<P: LlmProvider> ReActEngine<P, NoopHooks> {
+    pub fn new(provider: P, registry: ToolRegistry) -> Self {
+        Self::with_hooks(provider, registry, NoopHooks)
+    }
+}
+
+impl<P: LlmProvider, H: ReActHooks> ReActEngine<P, H> {
+    pub fn with_hooks(provider: P, registry: ToolRegistry, hooks: H) -> Self {
         Self {
-            backend,
+            provider,
             registry,
             hooks,
         }
     }
 
     pub fn spawn_with_options(self, opts: EngineSpawnOptions) -> AgentHandle {
-        let active_tool = Arc::new(Mutex::new(None));
-        let ctx = AgentContext {
-            active_tool: active_tool.clone(),
-            agent_tx: opts.agent_tx,
-        };
-
+        let active_tool = ActiveTool::default();
         let mut history = opts.history;
-        history.push(AgentMessage::User(opts.prompt));
-        let params = EngineRunParams {
-            backend: self.backend,
+        close_dangling_tool_calls(&mut history);
+        let mut state = EngineState {
+            provider: self.provider,
+            tools: self.registry.definitions(),
             registry: self.registry,
             hooks: self.hooks,
             history,
+            active_tool: active_tool.clone(),
+            agent_tx: opts.agent_tx,
         };
-        let task = tokio::spawn(run_engine_loop(params, ctx));
-
+        state.commit(AgentMessage::User(opts.prompt));
+        let task = crate::sys::runtime().spawn(state.run());
         AgentHandle {
             abort_handle: task.abort_handle(),
             active_tool,
@@ -336,139 +323,4 @@ impl<B: AgentBackend + 'static, H: ReActHooks> ReActEngine<B, H> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::backend::MockAgentBackend;
-
-    #[derive(Default)]
-    struct TrackingHooks {
-        thoughts: Vec<String>,
-        completed: Vec<String>,
-        block_tools: bool,
-    }
-
-    impl ReActHooks for TrackingHooks {
-        fn on_thought(&mut self, thought: &str) {
-            self.thoughts.push(thought.to_string());
-        }
-
-        fn before_tool(&mut self, _call: &ToolCallRequest) -> bool {
-            !self.block_tools
-        }
-
-        fn on_complete(&mut self, response: &str) {
-            self.completed.push(response.to_string());
-        }
-    }
-
-    async fn collect_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            let fin = matches!(ev, AgentEvent::Finished);
-            events.push(ev);
-            if fin {
-                break;
-            }
-        }
-        events
-    }
-
-    #[tokio::test]
-    async fn test_react_engine_with_hooks() {
-        let registry = ToolRegistry::with_defaults();
-        let backend = MockAgentBackend::from_steps(vec![
-            StepResult::Thought("Thinking step".into()),
-            StepResult::CallTool {
-                tool: "bash".into(),
-                input: "echo 42".into(),
-            },
-            StepResult::FinalAnswer("Answer 42".into()),
-        ]);
-
-        let hooks = TrackingHooks::default();
-        let engine = ReActEngine::with_hooks(backend, registry, hooks);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _handle = engine.spawn("test".into(), tx);
-
-        let events = collect_events(rx).await;
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::Thought(_))));
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolDone { .. })));
-        assert!(events.iter().any(|e| matches!(e, AgentEvent::Response(_))));
-    }
-
-    #[tokio::test]
-    async fn test_react_hooks_blocking_tool() {
-        let registry = ToolRegistry::with_defaults();
-        let backend = MockAgentBackend::from_steps(vec![StepResult::CallTool {
-            tool: "bash".into(),
-            input: "echo blocked".into(),
-        }]);
-
-        let hooks = TrackingHooks {
-            thoughts: Vec::new(),
-            completed: Vec::new(),
-            block_tools: true,
-        };
-        let engine = ReActEngine::with_hooks(backend, registry, hooks);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _handle = engine.spawn("test".into(), tx);
-
-        let events = collect_events(rx).await;
-        assert!(events.iter().any(|e| match e {
-            AgentEvent::Error(err) => err.contains("blocked by policy"),
-            _ => false,
-        }));
-    }
-
-    #[test]
-    fn test_truncate_observation_output() {
-        let short = "line 1\nline 2";
-        assert_eq!(truncate_observation_output(short), short);
-
-        let long = (0..300).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
-        let truncated = truncate_observation_output(&long);
-        let lines: Vec<&str> = truncated.lines().collect();
-        assert_eq!(lines.len(), 200);
-        assert_eq!(lines[0], "line 0");
-        assert_eq!(lines[119], "line 119");
-        assert_eq!(lines[120], "... [output truncated: 101 lines omitted] ...");
-        assert_eq!(lines[121], "line 221");
-        assert_eq!(lines[199], "line 299");
-    }
-
-    #[test]
-    fn test_repetition_guard() {
-        let mut guard = RepetitionGuard::default();
-        assert!(!guard.is_repetitive("bash", "ls"));
-        assert!(!guard.is_repetitive("bash", "ls"));
-        // 3rd time is detected as repetitive
-        assert!(guard.is_repetitive("bash", "ls"));
-
-        // Different tool or args resets counter
-        assert!(!guard.is_repetitive("bash", "pwd"));
-    }
-
-    #[tokio::test]
-    async fn test_react_engine_with_prior_history() {
-        let registry = ToolRegistry::with_defaults();
-        let backend = MockAgentBackend::from_steps(vec![StepResult::FinalAnswer("Got it".into())]);
-        let engine = ReActEngine::new(backend, registry);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let prior = vec![
-            AgentMessage::User("first turn".into()),
-            AgentMessage::Response("first answer".into()),
-        ];
-        let _handle = engine.spawn_with_options(EngineSpawnOptions {
-            prompt: "second turn".into(),
-            history: prior,
-            agent_tx: tx,
-        });
-
-        let events = collect_events(rx).await;
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::Response(r) if r == "Got it"))
-        );
-    }
-}
+mod tests;

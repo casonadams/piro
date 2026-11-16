@@ -1,15 +1,14 @@
 use std::collections::BTreeMap;
 
-use futures_util::StreamExt;
-use reqwest::Response;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::agent::backend::AgentMessage;
-use crate::agent::react::{AgentEvent, ToolCallRequest};
+use crate::agent::react::AgentEvent;
 use crate::agent::tool::ToolDefinition;
+use crate::agent::{AgentMessage, AssistantTurn, Thinking, ToolCall};
 use crate::provider::http::{HttpRequest, post_request};
-use crate::provider::{ChatRequestParams, LlmProvider, LlmResponse};
+use crate::provider::sse::{Flow, data_payload, for_each_line};
+use crate::provider::{ChatRequestParams, LlmProvider};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
@@ -22,81 +21,82 @@ pub struct OpenAiProvider {
     config: OpenAiConfig,
 }
 
+fn format_message(msg: &AgentMessage) -> Value {
+    match msg {
+        AgentMessage::User(u) => json!({ "role": "user", "content": u }),
+        AgentMessage::Assistant(turn) => {
+            let mut m = json!({ "role": "assistant", "content": turn.text });
+            if !turn.tool_calls.is_empty() {
+                let calls: Vec<Value> = turn.tool_calls.iter().map(format_tool_call).collect();
+                m["tool_calls"] = Value::Array(calls);
+            }
+            m
+        }
+        AgentMessage::ToolResult { call_id, output, .. } => {
+            json!({ "role": "tool", "tool_call_id": call_id, "content": output })
+        }
+    }
+}
+
+fn format_tool_call(call: &ToolCall) -> Value {
+    json!({
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json!({ "command": call.input }).to_string()
+        }
+    })
+}
+
+fn format_tools(tools: &[ToolDefinition]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string", "description": "Command or arguments" }
+                        },
+                        "required": ["command"]
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
 impl OpenAiProvider {
     pub fn new(config: OpenAiConfig) -> Self {
         Self { config }
     }
 
-    fn format_messages(&self, history: &[AgentMessage]) -> Vec<Value> {
-        let mut call_counter = 0;
-        let mut last_call_id = String::new();
-        history
-            .iter()
-            .filter_map(|msg| match msg {
-                AgentMessage::User(u) => Some(json!({ "role": "user", "content": u })),
-                AgentMessage::Thought(_) => None,
-                AgentMessage::ToolCall { name, input } => {
-                    call_counter += 1;
-                    let id = format!("call_{}_{}", name, call_counter);
-                    last_call_id = id.clone();
-                    Some(json!({
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": json!({ "command": input }).to_string()
-                            }
-                        }]
-                    }))
-                }
-                AgentMessage::Observation { output, .. } => {
-                    let id = if last_call_id.is_empty() {
-                        "call_1".to_string()
-                    } else {
-                        last_call_id.clone()
-                    };
-                    Some(json!({ "role": "tool", "tool_call_id": id, "content": output }))
-                }
-                AgentMessage::Response(r) => Some(json!({ "role": "assistant", "content": r })),
-            })
-            .collect()
-    }
-
-    fn format_tools(&self, tools: &[ToolDefinition]) -> Vec<Value> {
-        tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "command": { "type": "string", "description": "Command or arguments" }
-                            },
-                            "required": ["command"]
-                        }
-                    }
-                })
-            })
-            .collect()
+    fn chat_url(&self) -> String {
+        let base = self.config.base_url.trim_end_matches('/');
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{}/chat/completions", base)
+        }
     }
 }
 
 #[derive(Default)]
 struct ToolCallAccumulator {
+    id: String,
     name: String,
     arguments: String,
 }
 
 #[derive(Default)]
 pub struct SseChatAccumulator {
-    pub thinking: String,
-    pub content: String,
+    thinking: String,
+    content: String,
     tool_calls: BTreeMap<usize, ToolCallAccumulator>,
 }
 
@@ -105,60 +105,43 @@ impl SseChatAccumulator {
         &mut self,
         line: &str,
         delta_tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
-    ) -> Result<bool, String> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with(':') {
-            return Ok(false);
-        }
-        let Some(payload) = trimmed.strip_prefix("data:") else {
-            return Ok(false);
+    ) -> Result<Flow, String> {
+        let Some(payload) = data_payload(line) else {
+            return Ok(Flow::More);
         };
-        let payload = payload.trim();
         if payload == "[DONE]" {
-            return Ok(true);
+            return Ok(Flow::Done);
         }
-
         let val: Value = serde_json::from_str(payload).map_err(|e| format!("Failed to parse SSE JSON: {}", e))?;
-
-        if let Some(err) = val.get("error").and_then(Value::as_str) {
-            return Err(format!("OpenAI error: {}", err));
+        if let Some(err) = val.get("error") {
+            let msg = err.get("message").and_then(Value::as_str).or_else(|| err.as_str());
+            return Err(format!("OpenAI error: {}", msg.unwrap_or("unknown error")));
         }
-
         self.process_chunk(&val, delta_tx);
-        Ok(false)
+        Ok(Flow::More)
     }
 
     fn process_chunk(&mut self, val: &Value, delta_tx: Option<&mpsc::UnboundedSender<AgentEvent>>) {
-        let Some(choice) = val.get("choices").and_then(|c| c.get(0)) else {
+        let Some(delta) = val.pointer("/choices/0/delta") else {
             return;
         };
-        let Some(delta) = choice.get("delta") else {
-            return;
-        };
-
         let reasoning = delta
             .get("reasoning")
             .or_else(|| delta.get("reasoning_content"))
-            .and_then(Value::as_str);
-
-        if let Some(th) = reasoning
-            && !th.is_empty()
-        {
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        if let Some(th) = reasoning {
             self.thinking.push_str(th);
             if let Some(tx) = delta_tx {
                 let _ = tx.send(AgentEvent::ThoughtDelta(th.to_string()));
             }
         }
-
-        if let Some(c) = delta.get("content").and_then(Value::as_str)
-            && !c.is_empty()
-        {
+        if let Some(c) = delta.get("content").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             self.content.push_str(c);
             if let Some(tx) = delta_tx {
                 let _ = tx.send(AgentEvent::ResponseDelta(c.to_string()));
             }
         }
-
         if let Some(tcs) = delta.get("tool_calls").and_then(Value::as_array) {
             self.accumulate_tool_calls(tcs);
         }
@@ -168,33 +151,34 @@ impl SseChatAccumulator {
         for tc in tcs {
             let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
             let entry = self.tool_calls.entry(idx).or_default();
-            if let Some(func) = tc.get("function") {
-                if let Some(name) = func.get("name").and_then(Value::as_str) {
-                    entry.name.push_str(name);
-                }
-                if let Some(args) = func.get("arguments").and_then(Value::as_str) {
-                    entry.arguments.push_str(args);
-                }
+            if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                entry.id.push_str(id);
+            }
+            if let Some(name) = tc.pointer("/function/name").and_then(Value::as_str) {
+                entry.name.push_str(name);
+            }
+            if let Some(args) = tc.pointer("/function/arguments").and_then(Value::as_str) {
+                entry.arguments.push_str(args);
             }
         }
     }
 
-    pub fn finish(self) -> LlmResponse {
-        let (thinking, content) = finalize_thinking_and_content(self.thinking, self.content);
+    pub fn finish(self) -> AssistantTurn {
+        let (thinking, text) = finalize_thinking_and_content(self.thinking, self.content);
         let tool_calls = self
             .tool_calls
-            .into_values()
-            .filter(|tc| !tc.name.is_empty())
-            .map(|tc| ToolCallRequest {
-                name: tc.name,
+            .into_iter()
+            .filter(|(_, tc)| !tc.name.is_empty())
+            .map(|(idx, tc)| ToolCall {
+                id: if tc.id.is_empty() { format!("call_{idx}") } else { tc.id },
                 input: parse_tool_arg_command(&tc.arguments),
+                name: tc.name,
             })
             .collect();
-
-        LlmResponse {
-            thinking,
+        AssistantTurn {
+            thinking: thinking.map(|text| Thinking { text, signature: None }),
+            text,
             tool_calls,
-            content,
         }
     }
 }
@@ -208,76 +192,35 @@ fn parse_tool_arg_command(args: &str) -> String {
     args.to_string()
 }
 
+fn non_blank(s: String) -> Option<String> {
+    if s.trim().is_empty() { None } else { Some(s) }
+}
+
 fn finalize_thinking_and_content(thinking: String, content: String) -> (Option<String>, Option<String>) {
-    let th_opt = if thinking.trim().is_empty() {
-        None
-    } else {
-        Some(thinking)
-    };
-    if let Some(th) = th_opt {
-        let c_opt = if content.trim().is_empty() { None } else { Some(content) };
-        return (Some(th), c_opt);
+    if let Some(th) = non_blank(thinking) {
+        return (Some(th), non_blank(content));
     }
     if let Some(start) = content.find("<think>")
         && let Some(end) = content.find("</think>")
     {
         let thought = content[start + 7..end].trim().to_string();
         let remainder = content[end + 8..].trim().to_string();
-        let rem_opt = if remainder.is_empty() { None } else { Some(remainder) };
-        return (Some(thought), rem_opt);
+        return (Some(thought), non_blank(remainder));
     }
-    let c_opt = if content.trim().is_empty() { None } else { Some(content) };
-    (None, c_opt)
-}
-
-async fn read_sse_stream(
-    res: Response,
-    delta_tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
-) -> Result<LlmResponse, String> {
-    let mut stream = res.bytes_stream();
-    let mut acc = SseChatAccumulator::default();
-    let mut line_buf = String::new();
-
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res.map_err(|e| format!("Failed to read stream chunk: {}", e))?;
-        let text = String::from_utf8_lossy(&chunk);
-        line_buf.push_str(&text);
-
-        while let Some(pos) = line_buf.find('\n') {
-            let line = line_buf[..pos].trim().to_string();
-            line_buf.drain(..=pos);
-            if !line.is_empty() && acc.process_line(&line, delta_tx)? {
-                return Ok(acc.finish());
-            }
-        }
-    }
-
-    let remainder = line_buf.trim();
-    if !remainder.is_empty() {
-        let _ = acc.process_line(remainder, delta_tx)?;
-    }
-
-    Ok(acc.finish())
+    (None, non_blank(content))
 }
 
 impl LlmProvider for OpenAiProvider {
-    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<LlmResponse, String> {
-        let base = self.config.base_url.trim_end_matches('/');
-        let url = if base.ends_with("/chat/completions") {
-            base.to_string()
-        } else {
-            format!("{}/chat/completions", base)
-        };
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<AssistantTurn, String> {
         let payload = json!({
             "model": self.config.model,
-            "messages": self.format_messages(params.history),
-            "tools": self.format_tools(params.tools),
+            "messages": params.history.iter().map(format_message).collect::<Vec<_>>(),
+            "tools": format_tools(params.tools),
             "stream": true,
         });
-        let body_str = payload.to_string();
         let res = post_request(HttpRequest {
-            url: &url,
-            body: &body_str,
+            url: &self.chat_url(),
+            body: payload.to_string(),
             auth_token: self.config.api_key.as_deref(),
         })
         .await
@@ -291,80 +234,16 @@ impl LlmProvider for OpenAiProvider {
                 e
             }
         })?;
-
         if !res.status().is_success() {
             let status = res.status();
             let body = res.text().await.unwrap_or_default();
             return Err(format!("HTTP error {}: {}", status, body));
         }
-
-        read_sse_stream(res, params.delta_tx.as_ref()).await
+        let mut acc = SseChatAccumulator::default();
+        for_each_line(res, |line| acc.process_line(line, params.delta_tx)).await?;
+        Ok(acc.finish())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_sse_accumulator_ollama_reasoning_and_content() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut acc = SseChatAccumulator::default();
-
-        let line1 = "data: {\"choices\":[{\"delta\":{\"reasoning\":\"Pondering\"}}]}";
-        assert!(!acc.process_line(line1, Some(&tx)).unwrap());
-
-        let line2 = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello world\"}}]}";
-        assert!(!acc.process_line(line2, Some(&tx)).unwrap());
-
-        let line3 = "data: [DONE]";
-        assert!(acc.process_line(line3, Some(&tx)).unwrap());
-
-        let res = acc.finish();
-        assert_eq!(res.thinking.as_deref(), Some("Pondering"));
-        assert_eq!(res.content.as_deref(), Some("Hello world"));
-
-        let ev1 = rx.try_recv().unwrap();
-        let ev2 = rx.try_recv().unwrap();
-        assert!(matches!(ev1, AgentEvent::ThoughtDelta(t) if t == "Pondering"));
-        assert!(matches!(ev2, AgentEvent::ResponseDelta(r) if r == "Hello world"));
-    }
-
-    #[test]
-    fn test_sse_accumulator_deepseek_reasoning_content() {
-        let mut acc = SseChatAccumulator::default();
-        let line = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Deep reasoning\"}}]}";
-        assert!(!acc.process_line(line, None).unwrap());
-        let res = acc.finish();
-        assert_eq!(res.thinking.as_deref(), Some("Deep reasoning"));
-    }
-
-    #[test]
-    fn test_sse_accumulator_split_tool_calls() {
-        let mut acc = SseChatAccumulator::default();
-
-        let l1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"{\"command\": "}}]}}]}"#;
-        let l2 =
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"echo 42\"}"}}]}}]}"#;
-        let l3 = "data: [DONE]";
-
-        assert!(!acc.process_line(l1, None).unwrap());
-        assert!(!acc.process_line(l2, None).unwrap());
-        assert!(acc.process_line(l3, None).unwrap());
-
-        let res = acc.finish();
-        assert_eq!(res.tool_calls.len(), 1);
-        assert_eq!(res.tool_calls[0].name, "bash");
-        assert_eq!(res.tool_calls[0].input, "echo 42");
-    }
-
-    #[test]
-    fn test_sse_accumulator_inline_think_tags() {
-        let mut acc = SseChatAccumulator::default();
-        let line = "data: {\"choices\":[{\"delta\":{\"content\":\"<think>Inline plan</think>Final answer\"}}]}";
-        assert!(!acc.process_line(line, None).unwrap());
-        let res = acc.finish();
-        assert_eq!(res.thinking.as_deref(), Some("Inline plan"));
-        assert_eq!(res.content.as_deref(), Some("Final answer"));
-    }
-}
+mod tests;
