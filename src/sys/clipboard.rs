@@ -1,50 +1,103 @@
-use std::io::Write;
+//! The app's clipboard. Copies reach the terminal (OSC 52) between frames, and the system clipboard on macOS.
 
-pub fn copy(text: &str) {
-    copy_to_clipboard(text);
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use nsh_core::clipboard::ClipboardBackend;
+
+#[derive(Default)]
+pub struct TerminalClipboard {
+    state: Mutex<State>,
 }
 
-pub fn copy_to_clipboard(text: &str) {
-    // 1. Native terminal OSC 52 sequence
-    let b64 = base64_encode(text.as_bytes());
-    let osc52 = format!("\x1b]52;c;{}\x07", b64);
-    let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(osc52.as_bytes());
-    let _ = stdout.flush();
+#[derive(Default)]
+struct State {
+    copied: Option<String>,
+    initialized: bool,
+    pending: Option<String>,
+}
 
-    // 2. On macOS, pipe to pbcopy as a reliable system clipboard fallback
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::{Command, Stdio};
-        if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-                drop(stdin); // Flush and close stdin so pbcopy commits to clipboard
-            }
-            let _ = child.wait();
-        }
+impl TerminalClipboard {
+    /// Sends the text copied since the last call. Called between frames, so no escape splits a frame.
+    pub fn flush(&self) -> io::Result<()> {
+        let Some(text) = self.lock().pending.take() else {
+            return Ok(());
+        };
+        let mut out = io::stdout();
+        write!(out, "\x1b]52;c;{}\x07", STANDARD.encode(&text))?;
+        out.flush()?;
+        copy_to_pasteboard(&text);
+        Ok(())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(TABLE[(b0 >> 2) as usize] as char);
-        out.push(TABLE[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            out.push('=');
+impl ClipboardBackend for TerminalClipboard {
+    fn text(&self) -> Option<String> {
+        // Text copied here is ours; the system clipboard may belong to another machine (SSH).
+        let state = self.lock();
+        if state.initialized {
+            return state.copied.clone();
         }
-        if chunk.len() > 2 {
-            out.push(TABLE[(b2 & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
+        drop(state);
+        system_text()
     }
-    out
+
+    fn set_text(&self, text: Option<String>) {
+        let mut state = self.lock();
+        state.pending = Some(text.clone().unwrap_or_default());
+        state.copied = text;
+        state.initialized = true;
+    }
+}
+
+/// Pipes to `pbcopy`, waited on in the background: the frame loop never blocks on the pasteboard.
+#[cfg(target_os = "macos")]
+fn copy_to_pasteboard(text: &str) {
+    let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_to_pasteboard(_text: &str) {}
+
+#[cfg(target_os = "macos")]
+fn system_text() -> Option<String> {
+    run_paste(&[("pbpaste", &[])])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_text() -> Option<String> {
+    run_paste(&[
+        ("wl-paste", &["--no-newline"]),
+        ("xclip", &["-selection", "clipboard", "-out"]),
+    ])
+}
+
+fn run_paste(commands: &[(&str, &[&str])]) -> Option<String> {
+    commands.iter().find_map(|(program, args)| {
+        let output = Command::new(program)
+            .args(*args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8(output.stdout).ok())
+            .flatten()
+    })
 }

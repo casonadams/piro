@@ -1,51 +1,36 @@
-pub mod blocks;
-pub mod feed;
-pub mod footer;
-pub mod input;
-pub mod text;
+mod bridge;
+mod card_text;
+mod composer;
+mod feed;
+mod footer;
+#[cfg(test)]
+mod headless_tests;
+mod keys;
+mod login;
+mod palette;
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    widgets::Paragraph,
-};
+use nsh_core::prelude::*;
 
-use crate::app::App;
-use feed::draw_feed;
-use footer::draw_footer;
-use input::draw_input;
+use crate::app::session::Status;
+use bridge::Ui;
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
-    let size = frame.area();
-
-    // Layout:
-    // <output area> (feed)
-    // <empty space separator> (1 empty row)
-    // <user input area> (3 rows: top line, text row, bottom line)
-    // <footer area> (1 row, status badge + scroll notification)
-    let input_height = (app.input.visual_line_count(size.width as usize) as u16 + 2).clamp(3, 12);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),               // Output feed
-            Constraint::Length(1),            // Empty space separator
-            Constraint::Length(input_height), // User input area (top rule, text rows, bottom rule)
-            Constraint::Length(1),            // Footer
-        ])
-        .split(size);
-
-    let feed_area = chunks[0];
-    let empty_sep_area = chunks[1];
-    let input_area = chunks[2];
-    let footer_area = chunks[3];
-
-    draw_feed(frame, feed_area, app);
-    draw_empty_separator(frame, empty_sep_area);
-    draw_input(frame, input_area, app);
-    draw_footer(frame, footer_area, app);
-}
-
-fn draw_empty_separator(frame: &mut Frame, area: Rect) {
-    let p = Paragraph::new("");
-    frame.render_widget(p, area);
+/// The piro screen: the feed, a blank row, the prompt between rules, and the status line.
+#[component]
+pub fn App() -> impl IntoElement {
+    let ui = Ui::new();
+    keys::global_keys(&ui);
+    let status = ui.status;
+    let busy = {
+        let ui = ui.clone();
+        move || keys::busy_keys(ui.clone())
+    };
+    view()
+        .flex_1()
+        .flex_col()
+        .child(when(move || status.get() != Status::Ready, busy))
+        .child(feed::feed(ui.clone()))
+        .child(text(" "))
+        .child(composer::composer(ui.clone()))
+        .child(login::login_dialog(ui.clone()))
+        .child(footer::footer(ui))
 }
