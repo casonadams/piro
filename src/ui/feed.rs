@@ -9,20 +9,11 @@ pub fn feed(ui: Ui) -> impl IntoElement {
     let ids = ui.ids;
     let empty = move || ids.with(Vec::is_empty);
     view().flex_1().flex_col().child(when(empty, placeholder)).child(
-        virtual_list(
-            move || ids.with(Vec::len),
-            move |at| {
-                let id = ids.with_untracked(|v| v.get(at.index()).copied());
-                match id {
-                    Some(id) => card(ui.clone(), id),
-                    None => view().into_element(),
-                }
-            },
-        )
-        .keys(move || ids.get())
-        .alignment(ListAlignment::Bottom)
-        .follow_end(px(24.0))
-        .flex_1(),
+        virtual_list(move || ids.with(Vec::len), move |at| card(Row { ui: ui.clone(), at }))
+            .keys(move || ids.get())
+            .alignment(ListAlignment::Bottom)
+            .follow_end(px(24.0))
+            .flex_1(),
     )
 }
 
@@ -30,10 +21,34 @@ fn placeholder() -> impl IntoElement {
     text("No commands yet. Type a prompt, or !cmd / !!cmd, and press Enter.").text_color(palette::muted())
 }
 
-fn card(ui: Ui, id: u64) -> AnyElement {
+/// One recycled list cell. The list reuses a cell for other rows by moving its position, so every
+/// binding resolves the feed id from the position when it runs instead of capturing it once.
+#[derive(Clone)]
+struct Row {
+    ui: Ui,
+    at: Position,
+}
+
+impl Row {
+    fn id(&self) -> Option<u64> {
+        let index = self.at.index();
+        self.ui.ids.with(|ids| ids.get(index).copied())
+    }
+
+    fn card(&self) -> CardText {
+        self.id().map(|id| self.ui.card(id)).unwrap_or_default()
+    }
+
+    fn field(&self, pick: fn(CardText) -> String) -> impl Fn() -> String + use<> {
+        let row = self.clone();
+        move || pick(row.card())
+    }
+}
+
+fn card(row: Row) -> AnyElement {
     let accent = {
-        let ui = ui.clone();
-        move || palette::accent(ui.card(id).accent)
+        let row = row.clone();
+        move || palette::accent(row.card().accent)
     };
     view()
         .flex_col()
@@ -44,33 +59,32 @@ fn card(ui: Ui, id: u64) -> AnyElement {
             view()
                 .flex_row()
                 .justify_between()
-                .child(text(field(&ui, id, |c| c.header)).font_weight(FontWeight::BOLD))
-                .child(copy_button(ui.clone(), id)),
+                .child(text(row.field(|c| c.header)).font_weight(FontWeight::BOLD))
+                .child(copy_button(row.clone())),
         )
-        .child(muted_line(&ui, id, |c| c.hint.unwrap_or_default()))
-        .child(text(field(&ui, id, |c| c.body)))
-        .child(muted_line(&ui, id, |c| c.footer))
+        .child(muted_line(&row, |c| c.hint.unwrap_or_default()))
+        .child(text(row.field(|c| c.body)))
+        .child(muted_line(&row, |c| c.footer))
         .into_element()
 }
 
 /// A muted row that takes no space while its text is empty.
-fn muted_line(ui: &Ui, id: u64, pick: fn(CardText) -> String) -> impl IntoElement {
-    let shown = field(ui, id, pick);
-    let ui = ui.clone();
+fn muted_line(row: &Row, pick: fn(CardText) -> String) -> impl IntoElement {
+    let shown = row.field(pick);
+    let line = row.clone();
     when(
         move || !shown().is_empty(),
-        move || text(field(&ui, id, pick)).text_color(palette::muted()),
+        move || text(line.field(pick)).text_color(palette::muted()),
     )
 }
 
-fn field(ui: &Ui, id: u64, pick: fn(CardText) -> String) -> impl Fn() -> String + use<> {
-    let ui = ui.clone();
-    move || pick(ui.card(id))
-}
-
-fn copy_button(ui: Ui, id: u64) -> impl IntoElement {
+fn copy_button(row: Row) -> impl IntoElement {
     view()
         .px(px(1.0))
-        .on_press(move || ui.copy(id))
+        .on_press(move || {
+            if let Some(id) = row.id() {
+                row.ui.copy(id);
+            }
+        })
         .child(text("copy").text_color(palette::muted()))
 }

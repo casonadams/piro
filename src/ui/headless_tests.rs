@@ -36,6 +36,26 @@ fn escape_leaves_the_composer_focused() {
 }
 
 #[test]
+fn recycled_cards_show_their_own_rows_in_order() {
+    let mut app = started();
+    for n in 1..=24 {
+        run(&mut app, &format!("!!echo item-{n}"));
+        app.wait_for(&format!("text:$ echo item-{n}"))
+            .expect("the command card is shown");
+    }
+    app.wait(Duration::from_millis(200)).expect("the app settles");
+    let texts = app.screen().texts();
+    let headers: Vec<&str> = texts
+        .iter()
+        .copied()
+        .filter(|t| t.starts_with("$ echo item-"))
+        .collect();
+    assert_eq!(headers.last().copied(), Some("$ echo item-24"));
+    let mut seen = std::collections::HashSet::new();
+    assert!(headers.iter().all(|t| seen.insert(*t)), "a card repeats: {headers:?}");
+}
+
+#[test]
 fn double_bang_output_reaches_the_feed() {
     let mut app = started();
     run(&mut app, "!!echo hi");
