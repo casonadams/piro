@@ -1,4 +1,7 @@
+use std::borrow::Cow;
+
 use crate::app::feed::{CommandOutputBlock, CommandStatus, FeedItem, TAIL_LINES};
+use crate::sys::sanitize::clean_text;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Accent {
@@ -21,7 +24,23 @@ pub struct CardText {
     pub footer: String,
 }
 
+/// The card for `item`, with every string made safe for terminal cells.
 pub fn card_text(item: &FeedItem) -> CardText {
+    let card = raw_card_text(item);
+    let clean = |s: String| match clean_text(&s) {
+        Cow::Borrowed(_) => s,
+        Cow::Owned(cleaned) => cleaned,
+    };
+    CardText {
+        accent: card.accent,
+        header: clean(card.header),
+        hint: card.hint.map(clean),
+        body: clean(card.body),
+        footer: clean(card.footer),
+    }
+}
+
+fn raw_card_text(item: &FeedItem) -> CardText {
     match item {
         FeedItem::UserInput(text) => CardText {
             accent: Accent::Cyan,

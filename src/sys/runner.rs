@@ -5,6 +5,8 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
+use crate::sys::sanitize::clean_text;
+
 #[derive(Debug)]
 pub enum RunnerMsg {
     Line(String),
@@ -55,12 +57,15 @@ fn spawn_stream<R: AsyncRead + Unpin + Send + 'static>(
     tx: mpsc::UnboundedSender<RunnerMsg>,
 ) -> (tokio::task::JoinHandle<()>, AbortHandle) {
     let task = tokio::spawn(async move {
-        if let Some(s) = stream {
-            let mut reader = BufReader::new(s).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                if tx.send(RunnerMsg::Line(line)).is_err() {
-                    break;
-                }
+        let Some(s) = stream else { return };
+        let mut reader = BufReader::new(s);
+        let mut buf = Vec::new();
+        while reader.read_until(b'\n', &mut buf).await.is_ok_and(|n| n > 0) {
+            let raw = String::from_utf8_lossy(&buf);
+            let line = clean_text(raw.trim_end_matches(['\n', '\r'])).into_owned();
+            buf.clear();
+            if tx.send(RunnerMsg::Line(line)).is_err() {
+                break;
             }
         }
     });
@@ -77,11 +82,7 @@ fn build_shell_command(cmd_str: &str) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .env("CLICOLOR", "1")
-        .env("CLICOLOR_FORCE", "1")
-        .env("FORCE_COLOR", "1")
-        .env("COLORTERM", "truecolor")
-        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "1")
         .env("PAGER", "cat")
         .env("GIT_PAGER", "cat");
 

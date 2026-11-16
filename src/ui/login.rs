@@ -8,6 +8,7 @@ use nsh_core::keymap::When;
 use nsh_core::prelude::*;
 
 use crate::auth::claude::{self, LoginRequest};
+use crate::sys::sanitize::clean_text;
 use crate::ui::bridge::Ui;
 use crate::ui::card_text::Accent;
 use crate::ui::palette;
@@ -123,7 +124,7 @@ pub fn login_dialog(ui: Ui) -> impl IntoElement {
             .child(text("Sign in to Claude").font_weight(FontWeight::BOLD))
             .child(text(move || url.get()).selectable(true))
             .child(code_field(ui.clone()))
-            .child(text(move || status.get()).text_color(palette::muted()))
+            .child(text(move || clean_text(&status.get()).into_owned()).text_color(palette::muted()))
             .child(actions(ui.clone()))
     })
 }

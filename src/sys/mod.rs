@@ -3,6 +3,7 @@ pub mod filelog;
 pub mod host;
 pub mod rt;
 pub mod runner;
+pub mod sanitize;
 pub mod signals;
 pub mod terminal;
 
