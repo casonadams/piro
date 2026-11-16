@@ -26,6 +26,16 @@ fn keys_reach_the_composer_without_focusing_it_first() {
 }
 
 #[test]
+fn escape_leaves_the_composer_focused() {
+    let mut app = started();
+    app.press_key("escape").expect("the key is pressed");
+    for key in ["o", "k"] {
+        app.press_key(key).expect("the key is pressed");
+    }
+    app.wait_for("text:ok").expect("the typed text is in the prompt");
+}
+
+#[test]
 fn double_bang_output_reaches_the_feed() {
     let mut app = started();
     run(&mut app, "!!echo hi");

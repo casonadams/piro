@@ -28,12 +28,18 @@ fn field(ui: Ui) -> impl IntoElement {
     let selection = ui.selection;
     let submit = ui.clone();
     let field = ui.field;
+    let login_open = ui.login.open;
     let first_layout = std::cell::Cell::new(true);
     input()
         .test_id("composer")
         .element_ref(&field)
         .on_layout(move |_: &Bounds<Points>| {
             if first_layout.replace(false) {
+                field.focus();
+            }
+        })
+        .on_blur(move || {
+            if !login_open.get_untracked() {
                 field.focus();
             }
         })

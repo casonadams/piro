@@ -23,8 +23,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 const KEYBOARD_FLAGS: event::KeyboardEnhancementFlags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
     .union(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
     .union(event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS);
-/// crossterm's poll truncates to whole milliseconds on Linux and spins through the rest:
-/// there each poll is brief and `run_app` sleeps out its wait.
+/// How long crossterm may take to decode input that is already waiting.
 const DECODE_POLL: Duration = Duration::from_micros(50);
 
 /// Whether raw mode and the alternate screen are ours to restore.
@@ -107,23 +106,17 @@ pub fn set_cursor_style(style: CursorStyle) -> io::Result<()> {
     execute!(io::stdout(), shape)
 }
 
-/// Waits up to `timeout` for one terminal event and converts it. Idle when none arrived.
+/// Waits up to `timeout` for one terminal event and converts it. Idle when none arrived, Exit when the
+/// terminal is gone: crossterm's reader spins forever on a hung-up tty, so it only reads once input waits.
 pub fn poll(timeout: Duration) -> io::Result<RunEvent> {
-    if event::poll(poll_wait(timeout))? {
+    if wait_stdin(timeout)? == Stdin::HungUp {
+        return Ok(RunEvent::Exit);
+    }
+    if event::poll(DECODE_POLL)? {
         Ok(input::convert(event::read()?))
     } else {
         Ok(RunEvent::Idle)
     }
-}
-
-#[cfg(target_os = "macos")]
-fn poll_wait(timeout: Duration) -> Duration {
-    timeout.max(DECODE_POLL)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn poll_wait(_timeout: Duration) -> Duration {
-    DECODE_POLL
 }
 
 /// Restores the terminal once: a no-op when no session is active. Best-effort, as it runs from drop and panics.
@@ -166,8 +159,10 @@ fn query_replies() -> io::Result<Vec<u8>> {
         if left.is_zero() {
             break;
         }
-        if !stdin_ready(left)? {
-            continue;
+        match wait_stdin(left)? {
+            Stdin::Idle => continue,
+            Stdin::HungUp => break,
+            Stdin::Ready => {}
         }
         let mut chunk = [0u8; 256];
         let read = read_stdin(&mut chunk)?;
@@ -179,7 +174,14 @@ fn query_replies() -> io::Result<Vec<u8>> {
     Ok(replies)
 }
 
-fn stdin_ready(wait: Duration) -> io::Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stdin {
+    Ready,
+    Idle,
+    HungUp,
+}
+
+fn wait_stdin(wait: Duration) -> io::Result<Stdin> {
     let mut fd = libc::pollfd {
         fd: libc::STDIN_FILENO,
         events: libc::POLLIN,
@@ -191,12 +193,27 @@ fn stdin_ready(wait: Duration) -> io::Result<bool> {
     if ready < 0 {
         let error = io::Error::last_os_error();
         return if error.kind() == io::ErrorKind::Interrupted {
-            Ok(false)
+            Ok(Stdin::Idle)
         } else {
             Err(error)
         };
     }
-    Ok(ready > 0)
+    let hung_up = fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
+    Ok(if hung_up || (ready > 0 && pending_bytes() == 0) {
+        Stdin::HungUp
+    } else if ready > 0 {
+        Stdin::Ready
+    } else {
+        Stdin::Idle
+    })
+}
+
+/// Bytes waiting on stdin. macOS reports a hung-up tty as readable with nothing to read, not POLLHUP.
+fn pending_bytes() -> libc::c_int {
+    let mut pending: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one c_int to the pointer, which is valid for the call.
+    let status = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::FIONREAD, &mut pending) };
+    if status < 0 { 0 } else { pending }
 }
 
 /// Reads the descriptor directly: std's stdin buffer would hold back bytes crossterm must see.

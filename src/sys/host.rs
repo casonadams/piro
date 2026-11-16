@@ -65,11 +65,15 @@ impl Frontend {
             self.shown = self.cursor.get();
             terminal::set_cursor_style(self.shown)?;
         }
-        let event = terminal::poll(timeout)?;
-        if matches!(event, RunEvent::Input(Input::Focus(true))) {
-            terminal::input_modes()?;
+        // NSH drops keyboard focus when the surface blurs; piro keeps the composer focused instead.
+        match terminal::poll(timeout)? {
+            RunEvent::Input(Input::Focus(true)) => {
+                terminal::input_modes()?;
+                Ok(RunEvent::Redraw)
+            }
+            RunEvent::Input(Input::Focus(false)) => Ok(RunEvent::Idle),
+            event => Ok(event),
         }
-        Ok(event)
     }
 
     fn take_failure(&self) -> io::Result<()> {
