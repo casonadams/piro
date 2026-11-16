@@ -38,7 +38,6 @@ fn card(ui: Ui, id: u64) -> AnyElement {
     view()
         .flex_col()
         .px(px(8.0))
-        .pb(px(16.0))
         .border_1()
         .border_color(accent)
         .child(
@@ -48,10 +47,20 @@ fn card(ui: Ui, id: u64) -> AnyElement {
                 .child(text(field(&ui, id, |c| c.header)).font_weight(FontWeight::BOLD))
                 .child(copy_button(ui.clone(), id)),
         )
-        .child(text(field(&ui, id, |c| c.hint.unwrap_or_default())).text_color(palette::muted()))
+        .child(muted_line(&ui, id, |c| c.hint.unwrap_or_default()))
         .child(text(field(&ui, id, |c| c.body)))
-        .child(text(field(&ui, id, |c| c.footer)).text_color(palette::muted()))
+        .child(muted_line(&ui, id, |c| c.footer))
         .into_element()
+}
+
+/// A muted row that takes no space while its text is empty.
+fn muted_line(ui: &Ui, id: u64, pick: fn(CardText) -> String) -> impl IntoElement {
+    let shown = field(ui, id, pick);
+    let ui = ui.clone();
+    when(
+        move || !shown().is_empty(),
+        move || text(field(&ui, id, pick)).text_color(palette::muted()),
+    )
 }
 
 fn field(ui: &Ui, id: u64, pick: fn(CardText) -> String) -> impl Fn() -> String + use<> {
