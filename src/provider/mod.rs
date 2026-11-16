@@ -1,3 +1,4 @@
+pub mod claude;
 pub mod http;
 pub mod openai;
 pub mod sse;
@@ -7,6 +8,8 @@ use tokio::sync::mpsc;
 use crate::agent::react::AgentEvent;
 use crate::agent::tool::ToolDefinition;
 use crate::agent::{AgentMessage, AssistantTurn};
+use crate::auth::store::default_path;
+use claude::ClaudeProvider;
 
 pub use openai::{OpenAiConfig, OpenAiProvider};
 
@@ -27,12 +30,14 @@ pub trait LlmProvider: Send + Sync + 'static {
 
 pub enum AnyProvider {
     OpenAi(OpenAiProvider),
+    Claude(ClaudeProvider),
 }
 
 impl LlmProvider for AnyProvider {
     async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<AssistantTurn, String> {
         match self {
             Self::OpenAi(p) => p.chat_stream(params).await,
+            Self::Claude(p) => p.chat_stream(params).await,
         }
     }
 }
@@ -71,7 +76,7 @@ fn resolve_provider_config(provider: &str, model: &str) -> Result<OpenAiConfig, 
         "groq" => ("https://api.groq.com/openai/v1".into(), Some("GROQ_API_KEY")),
         unsupported => {
             return Err(format!(
-                "Unsupported provider '{}'. Supported providers: 'ollama', 'openai', 'openrouter', 'deepseek', 'groq'",
+                "Unsupported provider '{}'. Supported providers: 'ollama', 'openai', 'openrouter', 'deepseek', 'groq', 'anthropic', 'claude'",
                 unsupported
             ));
         }
@@ -89,8 +94,23 @@ pub fn provider_from_spec(spec: &str) -> Result<AnyProvider, String> {
     if parsed.model.is_empty() {
         return Err("Model name cannot be empty".into());
     }
-    let config = resolve_provider_config(parsed.provider.to_lowercase().as_str(), parsed.model)?;
-    Ok(AnyProvider::OpenAi(OpenAiProvider::new(config)))
+    match parsed.provider.to_lowercase().as_str() {
+        "claude" | "claude-code" | "claude-oauth" => {
+            let store_path = default_path()?;
+            Ok(AnyProvider::Claude(ClaudeProvider::oauth(parsed.model, store_path)))
+        }
+        "anthropic" => {
+            let key = std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty())
+                .ok_or("ANTHROPIC_API_KEY is not set; it is required for anthropic/<model>")?;
+            Ok(AnyProvider::Claude(ClaudeProvider::api_key(parsed.model, key)))
+        }
+        provider => {
+            let config = resolve_provider_config(provider, parsed.model)?;
+            Ok(AnyProvider::OpenAi(OpenAiProvider::new(config)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +183,7 @@ mod tests {
             "deepseek/deepseek-chat",
             "openrouter/auto",
             "groq/llama-3",
+            "claude/claude-sonnet-4-6",
         ] {
             assert!(provider_from_spec(ok).is_ok(), "{ok}");
         }

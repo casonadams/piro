@@ -1,10 +1,16 @@
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CliArgs {
     pub model: Option<String>,
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Login { provider: String },
 }
 
 pub fn print_help() -> &'static str {
-    "Usage: piro [OPTIONS]\n\nOptions:\n  -m, --model <PROVIDER/MODEL>  Model in format <provider>/<model> (e.g. ollama/ornith-1.5:35b, openai/gpt-4o)\n  -h, --help                    Print help\n"
+    "Usage: piro [OPTIONS]\n       piro login [PROVIDER]\n\nCommands:\n  login [PROVIDER]              Sign in and store credentials in ~/.piro/auth.json (default: claude)\n\nOptions:\n  -m, --model <PROVIDER/MODEL>  Model in format <provider>/<model> (e.g. ollama/ornith-1.5:35b, openai/gpt-4o, claude/claude-sonnet-4-6, anthropic/claude-sonnet-4-6)\n  -h, --help                    Print help\n"
 }
 
 fn parse_model_arg(arg: &str, iter: &mut impl Iterator<Item = String>) -> Result<String, String> {
@@ -21,8 +27,12 @@ fn parse_model_arg(arg: &str, iter: &mut impl Iterator<Item = String>) -> Result
 }
 
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, String> {
+    let mut iter = args.into_iter().skip(1).peekable();
+    if iter.peek().is_some_and(|arg| arg == "login") {
+        iter.next();
+        return parse_login(iter);
+    }
     let mut model = None;
-    let mut iter = args.into_iter().skip(1);
     while let Some(arg) = iter.next() {
         if arg == "-h" || arg == "--help" {
             return Err(print_help().to_string());
@@ -30,7 +40,25 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, St
         let val = parse_model_arg(&arg, &mut iter)?;
         model = Some(val);
     }
-    Ok(CliArgs { model })
+    Ok(CliArgs { model, command: None })
+}
+
+fn parse_login(rest: impl Iterator<Item = String>) -> Result<CliArgs, String> {
+    let mut provider = None;
+    for arg in rest {
+        if arg == "-h" || arg == "--help" {
+            return Err(print_help().to_string());
+        }
+        if arg.starts_with('-') || provider.is_some() {
+            return Err(format!("Unexpected argument '{arg}'. Usage: piro login [provider]"));
+        }
+        provider = Some(arg);
+    }
+    let provider = provider.unwrap_or_else(|| "claude".to_string());
+    Ok(CliArgs {
+        model: None,
+        command: Some(Command::Login { provider }),
+    })
 }
 
 #[cfg(test)]
@@ -62,5 +90,29 @@ mod tests {
 
         let missing = vec!["piro".into(), "--model".into()];
         assert!(parse_args(missing).is_err());
+    }
+
+    #[test]
+    fn test_parse_login_defaults_and_explicit_provider() {
+        let default = parse_args(vec!["piro".into(), "login".into()]).unwrap();
+        assert_eq!(
+            default.command,
+            Some(Command::Login {
+                provider: "claude".into()
+            })
+        );
+        assert_eq!(default.model, None);
+
+        let explicit = parse_args(vec!["piro".into(), "login".into(), "claude".into()]).unwrap();
+        assert_eq!(
+            explicit.command,
+            Some(Command::Login {
+                provider: "claude".into()
+            })
+        );
+
+        assert!(parse_args(vec!["piro".into(), "login".into(), "a".into(), "b".into()]).is_err());
+        assert!(parse_args(vec!["piro".into(), "login".into(), "--bogus".into()]).is_err());
+        assert!(parse_args(vec!["piro".into(), "login".into(), "--help".into()]).is_err());
     }
 }
