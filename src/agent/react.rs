@@ -123,8 +123,13 @@ impl RepetitionGuard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopAction {
     Continue,
+    /// The model only reasoned: no text and no tool call. Ask again without committing the turn.
+    Retry,
     Finish,
 }
+
+const MAX_SILENT_TURNS: usize = 3;
+const SILENT_NOTICE: &str = "The model stopped without an answer or a tool call.";
 
 struct EngineState<P, H> {
     provider: P,
@@ -229,6 +234,9 @@ impl<P: LlmProvider, H: ReActHooks> EngineState<P, H> {
         if let Some(thinking) = &turn.thinking {
             self.hooks.on_thought(&thinking.text);
         }
+        if turn.tool_calls.is_empty() && turn.text.is_none() {
+            return LoopAction::Retry;
+        }
         let calls = turn.tool_calls.clone();
         if calls.is_empty() {
             self.hooks.on_complete(turn.text.as_deref().unwrap_or_default());
@@ -248,7 +256,7 @@ impl<P: LlmProvider, H: ReActHooks> EngineState<P, H> {
     async fn run(mut self) {
         let max_steps = resolved_max_steps();
         let mut guard = RepetitionGuard::default();
-        let mut steps_taken = 0;
+        let (mut steps_taken, mut silent_turns) = (0, 0);
         loop {
             if max_steps.is_some_and(|limit| steps_taken >= limit) {
                 let msg = format!("Reached maximum step limit ({} steps).", steps_taken);
@@ -256,7 +264,13 @@ impl<P: LlmProvider, H: ReActHooks> EngineState<P, H> {
                 break;
             }
             steps_taken += 1;
-            if self.step(&mut guard).await == LoopAction::Finish {
+            match self.step(&mut guard).await {
+                LoopAction::Finish => break,
+                LoopAction::Continue => silent_turns = 0,
+                LoopAction::Retry => silent_turns += 1,
+            }
+            if silent_turns >= MAX_SILENT_TURNS {
+                self.emit(AgentEvent::Notice(SILENT_NOTICE.into()));
                 break;
             }
         }

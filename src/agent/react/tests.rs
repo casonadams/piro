@@ -130,6 +130,55 @@ async fn repeated_identical_calls_stop_the_loop_without_committing_the_turn() {
     assert_eq!(turns_committed, 2);
 }
 
+fn thinking_turn() -> AssistantTurn {
+    AssistantTurn {
+        thinking: Some(crate::agent::Thinking {
+            text: "I should look at the files".into(),
+            signature: None,
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn reasoning_only_turn_asks_again_instead_of_stopping() {
+    let provider = MockProvider::from_turns(vec![
+        tool_turn(vec![bash("c1", "echo listed")]),
+        thinking_turn(),
+        tool_turn(vec![bash("c2", "echo read")]),
+        text_turn("it is piro"),
+    ]);
+    let calls = provider.call_counter();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let _handle = ReActEngine::new(provider, ToolRegistry::with_defaults()).spawn("what is this".into(), tx);
+
+    let events = collect_events(rx).await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    let history = committed(&events);
+    assert_eq!(history.last(), Some(&AgentMessage::Assistant(text_turn("it is piro"))));
+    assert!(!history.contains(&AgentMessage::Assistant(thinking_turn())));
+}
+
+#[tokio::test]
+async fn repeated_reasoning_only_turns_end_with_a_notice() {
+    let provider = MockProvider::from_turns(vec![
+        thinking_turn(),
+        thinking_turn(),
+        thinking_turn(),
+        text_turn("late"),
+    ]);
+    let (tx, rx) = mpsc::unbounded_channel();
+    let _handle = ReActEngine::new(provider, ToolRegistry::with_defaults()).spawn("t".into(), tx);
+
+    let events = collect_events(rx).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(n) if n == SILENT_NOTICE))
+    );
+    assert!(!committed(&events).contains(&AgentMessage::Assistant(text_turn("late"))));
+}
+
 #[tokio::test]
 async fn prior_history_with_cancelled_call_is_closed_before_the_new_prompt() {
     let provider = MockProvider::from_turns(vec![text_turn("Got it")]);
