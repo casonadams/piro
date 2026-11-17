@@ -16,10 +16,12 @@ use caps::parse_replies;
 
 pub type Backend = CrosstermBackend<BufWriter<Stdout>>;
 
-/// The default foreground (OSC 10) and background (OSC 11), the kitty keyboard flags and DA1 last:
-/// DA1 is answered by every terminal, so its answer ends the wait.
+/// The default foreground (OSC 10) and background (OSC 11), the kitty keyboard flags and DA1 last.
+/// Every terminal answers DA1, but a multiplexer answers it itself before the outer terminal's colors arrive.
 const QUERY: &[u8] = b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?u\x1b[c";
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long to wait after DA1 for color answers; any that come later reach the input as typed text.
+const COLOR_GRACE: Duration = Duration::from_millis(500);
 const KEYBOARD_FLAGS: event::KeyboardEnhancementFlags = event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
     .union(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
     .union(event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS);
@@ -147,14 +149,21 @@ fn install_panic_hook() {
     }));
 }
 
-/// Writes the query and reads the answers until DA1 arrives or the timeout passes.
+/// Writes the query and reads the answers until DA1 and the background color arrived, or the timeout passes.
 fn query_replies() -> io::Result<Vec<u8>> {
     let mut out = io::stdout();
     out.write_all(QUERY)?;
     out.flush()?;
-    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let mut deadline = Instant::now() + QUERY_TIMEOUT;
     let mut replies = Vec::new();
-    while !parse_replies(&replies).complete {
+    loop {
+        let parsed = parse_replies(&replies);
+        if parsed.settled() {
+            break;
+        }
+        if parsed.complete {
+            deadline = deadline.min(Instant::now() + COLOR_GRACE);
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;

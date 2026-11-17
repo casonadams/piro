@@ -61,8 +61,15 @@ pub struct Replies {
     pub background: Option<[u8; 3]>,
     /// The kitty keyboard protocol's flags query was answered.
     pub keyboard: bool,
-    /// Primary device attributes arrived: no later answer will.
+    /// Primary device attributes arrived.
     pub complete: bool,
+}
+
+impl Replies {
+    /// DA1 and the background color both arrived; answers come in query order, so the foreground did too.
+    pub fn settled(&self) -> bool {
+        self.complete && self.background.is_some()
+    }
 }
 
 /// Reads OSC 10 / 11 color answers, the kitty flags answer (`CSI ? flags u`) and DA1 (`CSI ? ... c`).

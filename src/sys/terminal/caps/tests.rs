@@ -15,6 +15,14 @@ fn replies_carry_colors_keyboard_and_completion() {
 }
 
 #[test]
+fn a_multiplexers_early_da1_does_not_settle_before_the_colors() {
+    let early = parse_replies(b"\x1b[?62;22c\x1b]1");
+    assert!(early.complete && !early.settled());
+    let late = parse_replies(b"\x1b[?62;22c\x1b]10;rgb:f2f2/f4f4/f8f8\x1b\\\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\");
+    assert!(late.settled());
+}
+
+#[test]
 fn partial_and_short_replies() {
     assert_eq!(parse_color("rgb:f/8/0"), Some([255, 136, 0]));
     assert_eq!(parse_color("rgb:12345/0/0"), None);
