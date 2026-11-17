@@ -1,5 +1,7 @@
 //! Messages API headers and the friendly text for failed responses.
 
+use std::time::Duration;
+
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use serde_json::Value;
 
@@ -13,6 +15,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct ApiError {
     pub status: Option<u16>,
     pub body: String,
+    pub retry_after: Option<Duration>,
 }
 
 impl ApiError {
@@ -20,6 +23,7 @@ impl ApiError {
         Self {
             status: None,
             body: message.into(),
+            retry_after: None,
         }
     }
 }
@@ -118,6 +122,7 @@ mod tests {
         let err = |status| ApiError {
             status: Some(status),
             body: r#"{"error":{"message":"nope"}}"#.into(),
+            retry_after: None,
         };
         assert!(friendly_error(&err(401), AuthMode::OAuth).contains("piro login claude"));
         assert!(friendly_error(&err(401), AuthMode::ApiKey).contains("ANTHROPIC_API_KEY"));

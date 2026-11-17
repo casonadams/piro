@@ -3,9 +3,11 @@ pub mod http;
 pub mod openai;
 pub mod sse;
 
+use std::time::Duration;
+
 use tokio::sync::mpsc;
 
-use crate::agent::react::AgentEvent;
+use crate::agent::AgentEvent;
 use crate::agent::tool::ToolDefinition;
 use crate::agent::{AgentMessage, AssistantTurn};
 use crate::auth::store::default_path;
@@ -16,16 +18,64 @@ pub use openai::{OpenAiConfig, OpenAiProvider};
 pub const DEFAULT_MODEL_SPEC: &str = "ollama/ornith-1.5:35b";
 
 pub struct ChatRequestParams<'a> {
+    pub system: &'a str,
     pub history: &'a [AgentMessage],
     pub tools: &'a [ToolDefinition],
     pub delta_tx: Option<&'a mpsc::UnboundedSender<AgentEvent>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+impl Usage {
+    pub fn context(&self) -> u64 {
+        self.input + self.cache_read + self.cache_write + self.output
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reply {
+    pub turn: AssistantTurn,
+    pub usage: Usage,
+    /// The model hit its output token limit, so the last tool call may be cut short.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderError {
+    pub message: String,
+    /// Only set before any output streamed, since a retry would stream the reply again.
+    pub retryable: bool,
+    pub retry_after: Option<Duration>,
+}
+
+impl From<String> for ProviderError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+            retry_after: None,
+        }
+    }
 }
 
 pub trait LlmProvider: Send + Sync + 'static {
     fn chat_stream<'a>(
         &'a self,
         params: ChatRequestParams<'a>,
-    ) -> impl Future<Output = Result<AssistantTurn, String>> + Send + use<'a, Self>;
+    ) -> impl Future<Output = Result<Reply, ProviderError>> + Send + use<'a, Self>;
+}
+
+pub fn tool_input(raw: &str) -> serde_json::Value {
+    if raw.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()))
 }
 
 pub enum AnyProvider {
@@ -34,7 +84,7 @@ pub enum AnyProvider {
 }
 
 impl LlmProvider for AnyProvider {
-    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<AssistantTurn, String> {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<Reply, ProviderError> {
         match self {
             Self::OpenAi(p) => p.chat_stream(params).await,
             Self::Claude(p) => p.chat_stream(params).await,
@@ -123,18 +173,28 @@ mod mock {
 
     use super::*;
 
-    /// Replays scripted turns and records each history it was asked to continue.
+    /// Replays scripted replies and records each history it was asked to continue.
     #[derive(Default)]
     pub struct MockProvider {
-        turns: Vec<AssistantTurn>,
+        replies: Vec<Result<Reply, ProviderError>>,
         calls: Arc<AtomicUsize>,
         seen: Arc<Mutex<Vec<Vec<AgentMessage>>>>,
     }
 
     impl MockProvider {
         pub fn from_turns(turns: Vec<AssistantTurn>) -> Self {
+            let replies = turns.into_iter().map(|turn| {
+                Ok(Reply {
+                    turn,
+                    ..Default::default()
+                })
+            });
+            Self::from_replies(replies.collect())
+        }
+
+        pub fn from_replies(replies: Vec<Result<Reply, ProviderError>>) -> Self {
             Self {
-                turns,
+                replies,
                 ..Default::default()
             }
         }
@@ -149,16 +209,21 @@ mod mock {
     }
 
     impl LlmProvider for MockProvider {
-        async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<AssistantTurn, String> {
+        async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<Reply, ProviderError> {
             self.seen
                 .lock()
                 .map_err(|e| e.to_string())?
                 .push(params.history.to_vec());
             let i = self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.turns.get(i).cloned().unwrap_or_else(|| AssistantTurn {
-                text: Some("Done.".into()),
-                ..Default::default()
-            }))
+            self.replies.get(i).cloned().unwrap_or_else(|| {
+                Ok(Reply {
+                    turn: AssistantTurn {
+                        text: Some("Done.".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+            })
         }
     }
 }

@@ -1,24 +1,36 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
-    pub input: String,
+    pub input: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ToolCall {
+    pub fn summary(&self) -> String {
+        ["command", "path", "description"]
+            .iter()
+            .find_map(|key| self.input.get(key).and_then(Value::as_str))
+            .map_or_else(|| self.input.to_string(), str::to_owned)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thinking {
     pub text: String,
     pub signature: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssistantTurn {
     pub thinking: Option<Thinking>,
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentMessage {
     User(String),
     Assistant(AssistantTurn),

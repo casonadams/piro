@@ -111,7 +111,7 @@ mod tests {
         let stale = channels.agent.clone();
         stale.send(AgentEvent::Finished).unwrap();
         channels.reset();
-        let _ = stale.send(AgentEvent::Cancelled);
+        let _ = stale.send(AgentEvent::Notice("stale".into()));
         assert!(inbox.try_next().is_none());
 
         channels.agent.send(AgentEvent::Notice("fresh".into())).unwrap();

@@ -9,13 +9,13 @@ mod tests;
 use std::path::PathBuf;
 
 use reqwest::Response;
+use reqwest::header::HeaderMap;
 use serde_json::Value;
 
-use crate::agent::AssistantTurn;
 use crate::auth::claude::access_token;
-use crate::provider::http::client;
+use crate::provider::http::{client, retry_after, retryable_status};
 use crate::provider::sse::for_each_line;
-use crate::provider::{ChatRequestParams, LlmProvider};
+use crate::provider::{ChatRequestParams, LlmProvider, ProviderError, Reply};
 use http::{ApiError, MESSAGES_URL, friendly_error, request_headers};
 use stream::StreamAccumulator;
 
@@ -65,8 +65,7 @@ impl ClaudeProvider {
         }
     }
 
-    async fn post(&self, token: &str, body: &Value) -> Result<Response, ApiError> {
-        let headers = request_headers(self.mode(), token).map_err(ApiError::transport)?;
+    async fn post(&self, headers: HeaderMap, body: &Value) -> Result<Response, ApiError> {
         let res = client()
             .post(MESSAGES_URL)
             .headers(headers)
@@ -78,27 +77,33 @@ impl ClaudeProvider {
         if status.is_success() {
             return Ok(res);
         }
+        let retry_after = retry_after(res.headers());
         let body = res.text().await.unwrap_or_default();
         Err(ApiError {
             status: Some(status.as_u16()),
             body,
+            retry_after,
         })
     }
 
     /// A 401 on a subscription login refreshes the token once and retries; the retry's failure is final.
-    async fn send_with_refresh(&self, body: &Value) -> Result<Response, String> {
+    async fn send_with_refresh(&self, body: &Value) -> Result<Response, ProviderError> {
         let mut token = self.credential(None).await?;
-        let mut result = self.post(&token, body).await;
+        let mut result = self.post(request_headers(self.mode(), &token)?, body).await;
         if self.mode() == AuthMode::OAuth && result.as_ref().is_err_and(|e| e.status == Some(401)) {
             token = self.credential(Some(&token)).await?;
-            result = self.post(&token, body).await;
+            result = self.post(request_headers(self.mode(), &token)?, body).await;
         }
-        result.map_err(|e| friendly_error(&e, self.mode()))
+        result.map_err(|e| ProviderError {
+            message: friendly_error(&e, self.mode()),
+            retryable: e.status.is_none_or(retryable_status),
+            retry_after: e.retry_after,
+        })
     }
 }
 
 impl LlmProvider for ClaudeProvider {
-    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<AssistantTurn, String> {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<Reply, ProviderError> {
         let body = request::build_body(&self.model, self.mode(), &params);
         let res = self.send_with_refresh(&body).await?;
         let mut acc = StreamAccumulator::default();

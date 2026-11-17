@@ -13,7 +13,7 @@ fn streams_reasoning_and_content_deltas() {
     }
     assert_eq!(acc.process_line("data: [DONE]", Some(&tx)).unwrap(), Flow::Done);
 
-    let turn = acc.finish();
+    let turn = acc.finish().turn;
     assert_eq!(turn.thinking.map(|t| t.text).as_deref(), Some("Pondering"));
     assert_eq!(turn.text.as_deref(), Some("Hello world"));
     assert!(matches!(rx.try_recv().unwrap(), AgentEvent::ThoughtDelta(t) if t == "Pondering"));
@@ -25,7 +25,10 @@ fn reads_deepseek_reasoning_content() {
     let mut acc = SseChatAccumulator::default();
     let line = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Deep reasoning\"}}]}";
     acc.process_line(line, None).unwrap();
-    assert_eq!(acc.finish().thinking.map(|t| t.text).as_deref(), Some("Deep reasoning"));
+    assert_eq!(
+        acc.finish().turn.thinking.map(|t| t.text).as_deref(),
+        Some("Deep reasoning")
+    );
 }
 
 #[test]
@@ -39,10 +42,39 @@ fn assembles_parallel_tool_calls_with_their_ids() {
     for line in lines {
         acc.process_line(line, None).unwrap();
     }
-    let calls = acc.finish().tool_calls;
+    let calls = acc.finish().turn.tool_calls;
     assert_eq!(calls.len(), 2);
-    assert_eq!((calls[0].id.as_str(), calls[0].input.as_str()), ("call_a", "echo 42"));
-    assert_eq!((calls[1].id.as_str(), calls[1].input.as_str()), ("call_b", "pwd"));
+    assert_eq!(
+        (calls[0].id.as_str(), &calls[0].input),
+        ("call_a", &json!({ "command": "echo 42" }))
+    );
+    assert_eq!(
+        (calls[1].id.as_str(), &calls[1].input),
+        ("call_b", &json!({ "command": "pwd" }))
+    );
+}
+
+#[test]
+fn reads_usage_and_length_cutoff() {
+    let mut acc = SseChatAccumulator::default();
+    let lines = [
+        r#"data: {"choices":[{"delta":{"content":"cut"},"finish_reason":"length"}]}"#,
+        r#"data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":100}}}"#,
+    ];
+    for line in lines {
+        acc.process_line(line, None).unwrap();
+    }
+    let reply = acc.finish();
+    assert!(reply.truncated);
+    assert_eq!(
+        reply.usage,
+        Usage {
+            input: 20,
+            output: 30,
+            cache_read: 100,
+            cache_write: 0
+        }
+    );
 }
 
 #[test]
@@ -50,7 +82,7 @@ fn splits_inline_think_tags() {
     let mut acc = SseChatAccumulator::default();
     let line = "data: {\"choices\":[{\"delta\":{\"content\":\"<think>Inline plan</think>Final answer\"}}]}";
     acc.process_line(line, None).unwrap();
-    let turn = acc.finish();
+    let turn = acc.finish().turn;
     assert_eq!(turn.thinking.map(|t| t.text).as_deref(), Some("Inline plan"));
     assert_eq!(turn.text.as_deref(), Some("Final answer"));
 }
@@ -69,7 +101,7 @@ fn tool_results_reference_the_call_that_produced_them() {
     let call = ToolCall {
         id: "call_a".into(),
         name: "bash".into(),
-        input: "ls".into(),
+        input: json!({ "command": "ls" }),
     };
     let assistant = format_message(&AgentMessage::Assistant(AssistantTurn {
         tool_calls: vec![call],

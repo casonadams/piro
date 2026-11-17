@@ -32,7 +32,11 @@ fn start(args: CliArgs) -> Result<(), String> {
     if let Some(spec) = &args.model {
         provider::provider_from_spec(spec)?;
     }
-    launch::set(launch::LaunchOptions { model_spec: args.model })?;
+    launch::set(launch::LaunchOptions {
+        model_spec: args.model,
+        resume: args.resume,
+        auto_approve: args.auto_approve,
+    })?;
     sys::runtime();
     let ui_sets = vec![nsh_base::registry(), piro::registry()];
     sys::host::run(Root::of::<piro::App>(), ui_sets).map_err(|error| error.to_string())

@@ -20,7 +20,7 @@ pub fn busy_keys(ui: Ui) -> impl IntoElement {
     view()
 }
 
-fn consuming() -> KeyOptions {
+pub(crate) fn consuming() -> KeyOptions {
     KeyOptions {
         when: When::Always,
         repeat: false,

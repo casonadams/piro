@@ -7,11 +7,16 @@ use crate::agent::tool::ToolDefinition;
 use crate::agent::{AgentMessage, AssistantTurn, ToolCall};
 use crate::provider::ChatRequestParams;
 
-pub const MAX_TOKENS: u64 = 8192;
+/// Claude 4 models accept at least 32k output tokens.
+pub const MAX_TOKENS: u64 = 32_000;
 const IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
-const SYSTEM_PROMPT: &str = "You are piro, a terminal coding agent. Run shell commands with the Bash tool when they \
-help answer the user. Keep replies concise.";
-const TOOL_NAMES: [(&str, &str); 1] = [("bash", "Bash")];
+const TOOL_NAMES: [(&str, &str); 5] = [
+    ("bash", "Bash"),
+    ("read", "Read"),
+    ("write", "Write"),
+    ("edit", "Edit"),
+    ("task", "Task"),
+];
 
 pub fn normalize_model_alias(model: &str) -> &str {
     match model {
@@ -59,7 +64,7 @@ pub fn build_body(model: &str, mode: AuthMode, params: &ChatRequestParams<'_>) -
         "model": normalize_model_alias(model),
         "max_tokens": MAX_TOKENS,
         "stream": true,
-        "system": system_blocks(mode),
+        "system": system_blocks(mode, params.system),
         "messages": convert_messages(params.history),
     });
     if !tools.is_empty() {
@@ -73,24 +78,20 @@ fn ephemeral() -> Value {
 }
 
 /// Subscription logins must open with Claude Code's identity block; the piro prompt follows and carries the cache marker.
-fn system_blocks(mode: AuthMode) -> Value {
+fn system_blocks(mode: AuthMode, system: &str) -> Value {
     let mut blocks = Vec::new();
     if mode == AuthMode::OAuth {
         blocks.push(json!({ "type": "text", "text": IDENTITY }));
     }
-    blocks.push(json!({ "type": "text", "text": SYSTEM_PROMPT, "cache_control": ephemeral() }));
+    blocks.push(json!({ "type": "text", "text": system, "cache_control": ephemeral() }));
     Value::Array(blocks)
 }
 
 fn tool_json(tool: &ToolDefinition) -> Value {
     json!({
-        "name": to_claude_tool_name(tool.name),
+        "name": to_claude_tool_name(&tool.name),
         "description": tool.description,
-        "input_schema": {
-            "type": "object",
-            "properties": { "command": { "type": "string", "description": "Shell command to run" } },
-            "required": ["command"],
-        },
+        "input_schema": tool.schema,
     })
 }
 
@@ -142,12 +143,18 @@ fn assistant_blocks(turn: &AssistantTurn) -> Vec<Value> {
     blocks
 }
 
+/// The API takes only object inputs, so arguments that never parsed are sent back as an empty object.
 fn tool_use(call: &ToolCall) -> Value {
+    let input = if call.input.is_object() {
+        call.input.clone()
+    } else {
+        json!({})
+    };
     json!({
         "type": "tool_use",
         "id": call.id,
         "name": to_claude_tool_name(&call.name),
-        "input": { "command": call.input },
+        "input": input,
     })
 }
 

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -73,11 +74,31 @@ fn spawn_stream<R: AsyncRead + Unpin + Send + 'static>(
     (task, abort)
 }
 
-fn build_shell_command(cmd_str: &str) -> Command {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+/// A script for a shell. `shell: None` is the user's `$SHELL`; `cwd: None` is piro's own directory.
+pub struct ShellJob {
+    pub script: String,
+    pub shell: Option<&'static str>,
+    pub cwd: Option<PathBuf>,
+}
+
+impl ShellJob {
+    pub fn user(script: String) -> Self {
+        Self {
+            script,
+            shell: None,
+            cwd: None,
+        }
+    }
+}
+
+fn build_shell_command(job: &ShellJob) -> Command {
+    let shell = match job.shell {
+        Some(shell) => shell.to_owned(),
+        None => std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+    };
     let mut cmd = Command::new(shell);
     cmd.arg("-c")
-        .arg(cmd_str)
+        .arg(&job.script)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -85,16 +106,19 @@ fn build_shell_command(cmd_str: &str) -> Command {
         .env("NO_COLOR", "1")
         .env("PAGER", "cat")
         .env("GIT_PAGER", "cat");
+    if let Some(cwd) = &job.cwd {
+        cmd.current_dir(cwd);
+    }
 
     #[cfg(unix)]
     cmd.process_group(0);
     cmd
 }
 
-pub fn spawn_command(cmd_str: String, tx: mpsc::UnboundedSender<RunnerMsg>) -> ProcessHandle {
+pub fn spawn_command(job: ShellJob, tx: mpsc::UnboundedSender<RunnerMsg>) -> ProcessHandle {
     let _runtime = crate::sys::runtime().enter();
     let start = Instant::now();
-    let mut cmd = build_shell_command(&cmd_str);
+    let mut cmd = build_shell_command(&job);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -142,7 +166,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_command() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let _handle = spawn_command("echo test_ok".into(), tx);
+        let _handle = spawn_command(ShellJob::user("echo test_ok".into()), tx);
 
         let mut lines = Vec::new();
         let mut exit = None;
@@ -164,7 +188,7 @@ mod tests {
     #[tokio::test]
     async fn test_kill_command_in_tracks() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut handle = spawn_command("sleep 30".into(), tx);
+        let mut handle = spawn_command(ShellJob::user("sleep 30".into()), tx);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         handle.kill();

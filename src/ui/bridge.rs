@@ -6,8 +6,9 @@ use nsh_core::prelude::*;
 use crate::app::channels::{Inbox, channels};
 use crate::app::feed::FeedItem;
 use crate::app::history::{byte_index, caret_on_first_line, caret_on_last_line, load_history};
-use crate::app::session::{Session, Status, UiRequest};
+use crate::app::session::{Approval, Session, Status, UiRequest};
 use crate::ui::card_text::{CardText, card_text};
+use crate::ui::footer::status_line;
 use crate::ui::login::Login;
 
 /// The session on the engine thread, mirrored into signals after every change.
@@ -17,6 +18,8 @@ pub struct Ui {
     pub ids: Signal<Vec<u64>>,
     pub revision: Signal<u64>,
     pub status: Signal<Status>,
+    pub status_line: Signal<String>,
+    pub approval: Signal<Option<String>>,
     pub composer: Signal<String>,
     /// The caret, in UTF-16 units, as the field reports it.
     pub caret: Signal<u32>,
@@ -30,12 +33,14 @@ impl Ui {
     /// Starts the session and the task that applies engine and process output to it.
     pub fn new() -> Self {
         let (channels, inbox) = channels();
-        let session = Session::new(crate::launch::model_spec(), load_history(), channels);
+        let session = Session::new(crate::launch::session_config(), load_history(), channels);
         let ui = Self {
+            status_line: signal(status_line(&session)),
             session: Rc::new(RefCell::new(session)),
             ids: signal(Vec::new()),
             revision: signal(0),
             status: signal(Status::Ready),
+            approval: signal(None),
             composer: signal(String::new()),
             caret: signal(0),
             selection: signal_with((0, 0), SignalEquals::Never),
@@ -43,6 +48,7 @@ impl Ui {
             login: Login::new(),
         };
         ui.drain(inbox);
+        ui.sync();
         ui
     }
 
@@ -81,13 +87,19 @@ impl Ui {
     }
 
     fn sync(&self) {
-        let (ids, status) = {
+        let (ids, status, line, approval) = {
             let s = self.session.borrow();
-            (s.feed.ids(), s.status())
+            (s.feed.ids(), s.status(), status_line(&s), s.approval_prompt())
         };
         self.ids.set(ids);
         self.status.set(status);
+        self.status_line.set(line);
+        self.approval.set(approval);
         self.revision.update(|r| *r += 1);
+    }
+
+    pub fn answer_approval(&self, approval: Approval) {
+        self.with(|s| s.answer_approval(approval));
     }
 
     pub fn submit(&self, text: &str) {

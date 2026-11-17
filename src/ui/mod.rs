@@ -1,3 +1,4 @@
+mod approval;
 mod bridge;
 mod card_text;
 mod composer;
@@ -32,5 +33,6 @@ pub fn App() -> impl IntoElement {
         .child(text(" "))
         .child(composer::composer(ui.clone()))
         .child(login::login_dialog(ui.clone()))
+        .child(approval::approval_dialog(ui.clone()))
         .child(footer::footer(ui))
 }

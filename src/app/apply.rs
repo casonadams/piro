@@ -1,7 +1,11 @@
+use std::time::Duration;
+
+use crate::agent::tool::ToolExit;
 use crate::agent::{AgentEvent, AgentMessage, ToolCall};
 use crate::app::channels::Incoming;
 use crate::app::feed::{AgentSlot, CommandOutputBlock, FeedItem};
 use crate::app::session::Session;
+use crate::provider::Usage;
 use crate::sys::RunnerMsg;
 
 impl Session {
@@ -29,12 +33,13 @@ impl Session {
             AgentEvent::ToolOutput { call_id, line } => self.with_tool(&call_id, |b| b.push_line(line)),
             AgentEvent::ToolDone { call_id, exit } => self.with_tool(&call_id, |b| b.complete(exit)),
             AgentEvent::Committed(msg) => self.commit(msg),
-            AgentEvent::Notice(text) => {
-                self.feed.push(FeedItem::AgentResponse(text));
-            }
-            AgentEvent::Finished | AgentEvent::Cancelled => self.finish_agent(),
+            AgentEvent::Compacted(history) => self.compacted(history),
+            AgentEvent::Usage(usage) => self.record_usage(usage),
+            AgentEvent::Approval(request) => self.request_approval(request),
+            AgentEvent::Notice(text) => self.notice(text),
+            AgentEvent::Finished => self.finish_agent(),
             AgentEvent::Error(err) => {
-                self.feed.push(FeedItem::AgentResponse(format!("Error: {err}")));
+                self.notice(format!("Error: {err}"));
                 self.finish_agent();
             }
         }
@@ -50,40 +55,102 @@ impl Session {
         }
     }
 
-    /// Mirrors an engine message into the agent context; a committed assistant turn replaces its streamed cards.
+    /// Mirrors an engine message into the agent context and the saved conversation; a committed assistant
+    /// turn replaces its streamed cards, and a tool result fills its card when the tool streamed nothing.
     fn commit(&mut self, msg: AgentMessage) {
-        if let AgentMessage::Assistant(turn) = &msg {
-            if let Some(thinking) = &turn.thinking {
-                self.feed.set_text(AgentSlot::Thought, thinking.text.clone());
+        match &msg {
+            AgentMessage::Assistant(turn) => {
+                if let Some(thinking) = &turn.thinking {
+                    self.feed.set_text(AgentSlot::Thought, thinking.text.clone());
+                }
+                if let Some(text) = &turn.text {
+                    self.feed.set_text(AgentSlot::Response, text.clone());
+                }
             }
-            if let Some(text) = &turn.text {
-                self.feed.set_text(AgentSlot::Response, text.clone());
-            }
+            AgentMessage::ToolResult { call_id, output, .. } => self.with_tool(call_id, |b| fill_empty(b, output)),
+            AgentMessage::User(_) => {}
         }
+        self.transcript.append(&msg);
         self.agent_history.push(msg);
+    }
+
+    fn compacted(&mut self, history: Vec<AgentMessage>) {
+        self.transcript.rewrite(&history);
+        self.agent_history = history;
+        self.context_tokens = 0;
+        self.notice("Conversation compacted.".into());
+    }
+
+    fn record_usage(&mut self, usage: Usage) {
+        self.tokens.input += usage.input;
+        self.tokens.output += usage.output;
+        self.tokens.cache_read += usage.cache_read;
+        self.tokens.cache_write += usage.cache_write;
+        self.context_tokens = usage.context();
+    }
+
+    pub(crate) fn replay(&mut self, messages: Vec<AgentMessage>) {
+        for msg in messages {
+            match &msg {
+                AgentMessage::User(text) => {
+                    self.feed.push(FeedItem::UserInput(text.clone()));
+                }
+                AgentMessage::Assistant(turn) => {
+                    if let Some(text) = &turn.text {
+                        self.feed.push(FeedItem::AgentResponse(text.clone()));
+                    }
+                    for call in &turn.tool_calls {
+                        self.feed.push(FeedItem::CommandOutput(tool_block(call.clone())));
+                    }
+                }
+                AgentMessage::ToolResult {
+                    call_id,
+                    output,
+                    success,
+                } => self.with_tool(call_id, |block| replay_result(block, output, *success)),
+            }
+            self.agent_history.push(msg);
+        }
+    }
+}
+
+fn replay_result(block: &mut CommandOutputBlock, output: &str, success: bool) {
+    fill_empty(block, output);
+    block.complete(ToolExit {
+        code: Some(if success { 0 } else { 1 }),
+        duration: Duration::ZERO,
+    });
+}
+
+fn fill_empty(block: &mut CommandOutputBlock, output: &str) {
+    if block.lines.is_empty() {
+        output.lines().for_each(|line| block.push_line(line.to_owned()));
     }
 }
 
 fn tool_block(call: ToolCall) -> CommandOutputBlock {
-    let mut block = CommandOutputBlock::new(call.input, Some(call.name));
+    let mut block = CommandOutputBlock::new(call.summary(), Some(call.name));
     block.call_id = Some(call.id);
     block
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-    use crate::agent::tool::ToolExit;
-    use crate::agent::{AssistantTurn, Thinking};
+    use crate::agent::{ApprovalRequest, AssistantTurn, Thinking};
     use crate::app::channels::channels;
     use crate::app::feed::CommandStatus;
     use crate::app::history::History;
+    use crate::app::session::{Approval, Status};
+    use crate::launch::SessionConfig;
 
     fn session() -> Session {
         let (channels, _inbox) = channels();
-        Session::new("ollama/test".into(), History::default(), channels)
+        let config = SessionConfig {
+            model_spec: "ollama/test".into(),
+            ..Default::default()
+        };
+        Session::new(config, History::default(), channels)
     }
 
     fn texts(s: &Session) -> Vec<String> {
@@ -94,7 +161,7 @@ mod tests {
         ToolCall {
             id: id.into(),
             name: "bash".into(),
-            input: input.into(),
+            input: serde_json::json!({ "command": input }),
         }
     }
 
@@ -188,10 +255,62 @@ mod tests {
     }
 
     #[test]
-    fn finished_and_cancelled_end_the_agent_turn() {
+    fn finished_ends_the_agent_turn() {
         let mut s = session();
         s.apply_agent(AgentEvent::Finished);
-        s.apply_agent(AgentEvent::Cancelled);
-        assert_eq!(s.status(), crate::app::session::Status::Ready);
+        assert_eq!(s.status(), Status::Ready);
+    }
+
+    #[test]
+    fn always_allow_answers_later_calls_of_the_same_tool() {
+        let mut s = session();
+        let (first, mut first_rx) = ApprovalRequest::new(tool_call("a", "ls"));
+        s.apply_agent(AgentEvent::Approval(first));
+        assert_eq!(s.status(), Status::Approval);
+        assert_eq!(s.approval_prompt().as_deref(), Some("bash: ls"));
+        s.answer_approval(Approval::AlwaysAllow);
+        assert_eq!(first_rx.try_recv(), Ok(true));
+
+        let (second, mut second_rx) = ApprovalRequest::new(tool_call("b", "rm x"));
+        s.apply_agent(AgentEvent::Approval(second));
+        assert_eq!(second_rx.try_recv(), Ok(true));
+        assert_eq!(s.status(), Status::Ready);
+
+        let write = ToolCall {
+            id: "c".into(),
+            name: "write".into(),
+            input: serde_json::json!({ "path": "f", "content": "x" }),
+        };
+        let (third, mut third_rx) = ApprovalRequest::new(write);
+        s.apply_agent(AgentEvent::Approval(third));
+        assert!(s.approval_prompt().is_some_and(|p| p.starts_with("write: f\n{")));
+        s.answer_approval(Approval::Deny);
+        assert_eq!(third_rx.try_recv(), Ok(false));
+    }
+
+    #[test]
+    fn replay_rebuilds_cards_and_context_from_a_saved_conversation() {
+        let mut s = session();
+        let messages = vec![
+            AgentMessage::User("list".into()),
+            AgentMessage::Assistant(AssistantTurn {
+                tool_calls: vec![tool_call("a", "ls")],
+                ..Default::default()
+            }),
+            AgentMessage::ToolResult {
+                call_id: "a".into(),
+                output: "one\ntwo".into(),
+                success: false,
+            },
+            AgentMessage::Assistant(AssistantTurn {
+                text: Some("Two files.".into()),
+                ..Default::default()
+            }),
+        ];
+        s.replay(messages.clone());
+        assert_eq!(texts(&s), ["list", "one\ntwo", "Two files."]);
+        let id = s.feed.tool_block_id("a").expect("block");
+        assert!(matches!(s.feed.get(id), Some(FeedItem::CommandOutput(b)) if b.status == CommandStatus::Failed(1)));
+        assert_eq!(s.agent_history, messages);
     }
 }

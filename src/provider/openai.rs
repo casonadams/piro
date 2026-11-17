@@ -3,12 +3,12 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::agent::react::AgentEvent;
+use crate::agent::AgentEvent;
 use crate::agent::tool::ToolDefinition;
 use crate::agent::{AgentMessage, AssistantTurn, Thinking, ToolCall};
-use crate::provider::http::{HttpRequest, post_request};
+use crate::provider::http::{HttpRequest, post_request, status_error};
 use crate::provider::sse::{Flow, data_payload, for_each_line};
-use crate::provider::{ChatRequestParams, LlmProvider};
+use crate::provider::{ChatRequestParams, LlmProvider, ProviderError, Reply, Usage, tool_input};
 
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
@@ -42,10 +42,7 @@ fn format_tool_call(call: &ToolCall) -> Value {
     json!({
         "id": call.id,
         "type": "function",
-        "function": {
-            "name": call.name,
-            "arguments": json!({ "command": call.input }).to_string()
-        }
+        "function": { "name": call.name, "arguments": call.input.to_string() }
     })
 }
 
@@ -55,17 +52,7 @@ fn format_tools(tools: &[ToolDefinition]) -> Vec<Value> {
         .map(|t| {
             json!({
                 "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": { "type": "string", "description": "Command or arguments" }
-                        },
-                        "required": ["command"]
-                    }
-                }
+                "function": { "name": t.name, "description": t.description, "parameters": t.schema }
             })
         })
         .collect()
@@ -98,6 +85,8 @@ pub struct SseChatAccumulator {
     thinking: String,
     content: String,
     tool_calls: BTreeMap<usize, ToolCallAccumulator>,
+    usage: Usage,
+    truncated: bool,
 }
 
 impl SseChatAccumulator {
@@ -122,6 +111,12 @@ impl SseChatAccumulator {
     }
 
     fn process_chunk(&mut self, val: &Value, delta_tx: Option<&mpsc::UnboundedSender<AgentEvent>>) {
+        if let Some(usage) = val.get("usage").filter(|u| u.is_object()) {
+            self.usage = parse_usage(usage);
+        }
+        if val.pointer("/choices/0/finish_reason").and_then(Value::as_str) == Some("length") {
+            self.truncated = true;
+        }
         let Some(delta) = val.pointer("/choices/0/delta") else {
             return;
         };
@@ -163,7 +158,7 @@ impl SseChatAccumulator {
         }
     }
 
-    pub fn finish(self) -> AssistantTurn {
+    pub fn finish(self) -> Reply {
         let (thinking, text) = finalize_thinking_and_content(self.thinking, self.content);
         let tool_calls = self
             .tool_calls
@@ -171,25 +166,32 @@ impl SseChatAccumulator {
             .filter(|(_, tc)| !tc.name.is_empty())
             .map(|(idx, tc)| ToolCall {
                 id: if tc.id.is_empty() { format!("call_{idx}") } else { tc.id },
-                input: parse_tool_arg_command(&tc.arguments),
+                input: tool_input(&tc.arguments),
                 name: tc.name,
             })
             .collect();
-        AssistantTurn {
-            thinking: thinking.map(|text| Thinking { text, signature: None }),
-            text,
-            tool_calls,
+        Reply {
+            turn: AssistantTurn {
+                thinking: thinking.map(|text| Thinking { text, signature: None }),
+                text,
+                tool_calls,
+            },
+            usage: self.usage,
+            truncated: self.truncated,
         }
     }
 }
 
-fn parse_tool_arg_command(args: &str) -> String {
-    if let Ok(val) = serde_json::from_str::<Value>(args)
-        && let Some(cmd) = val.get("command").and_then(Value::as_str)
-    {
-        return cmd.to_string();
+/// `prompt_tokens` includes cached tokens, which OpenAI reports under `prompt_tokens_details`.
+fn parse_usage(usage: &Value) -> Usage {
+    let count = |pointer: &str| usage.pointer(pointer).and_then(Value::as_u64).unwrap_or_default();
+    let cached = count("/prompt_tokens_details/cached_tokens");
+    Usage {
+        input: count("/prompt_tokens").saturating_sub(cached),
+        output: count("/completion_tokens"),
+        cache_read: cached,
+        cache_write: 0,
     }
-    args.to_string()
 }
 
 fn non_blank(s: String) -> Option<String> {
@@ -210,35 +212,47 @@ fn finalize_thinking_and_content(thinking: String, content: String) -> (Option<S
     (None, non_blank(content))
 }
 
-impl LlmProvider for OpenAiProvider {
-    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<AssistantTurn, String> {
-        let payload = json!({
-            "model": self.config.model,
-            "messages": params.history.iter().map(format_message).collect::<Vec<_>>(),
-            "tools": format_tools(params.tools),
-            "stream": true,
-        });
+impl OpenAiProvider {
+    async fn send(&self, payload: &Value) -> Result<reqwest::Response, ProviderError> {
         let res = post_request(HttpRequest {
             url: &self.chat_url(),
             body: payload.to_string(),
             auth_token: self.config.api_key.as_deref(),
         })
         .await
-        .map_err(|e| {
-            if e.contains("connect") || e.contains("refused") {
+        .map_err(|e| ProviderError {
+            message: if e.is_connect() {
                 format!(
-                    "Provider unreachable at {}. Ensure service is running.",
+                    "Provider unreachable at {}. Ensure the service is running.",
                     self.config.base_url
                 )
             } else {
-                e
-            }
+                format!("HTTP request failed: {e}")
+            },
+            retryable: !e.is_connect(),
+            retry_after: None,
         })?;
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            return Err(format!("HTTP error {}: {}", status, body));
+        if res.status().is_success() {
+            return Ok(res);
         }
+        Err(status_error(res, |status, body| format!("HTTP error {status}: {body}")).await)
+    }
+}
+
+impl LlmProvider for OpenAiProvider {
+    async fn chat_stream(&self, params: ChatRequestParams<'_>) -> Result<Reply, ProviderError> {
+        let system = json!({ "role": "system", "content": params.system });
+        let messages: Vec<Value> = std::iter::once(system)
+            .chain(params.history.iter().map(format_message))
+            .collect();
+        let payload = json!({
+            "model": self.config.model,
+            "messages": messages,
+            "tools": format_tools(params.tools),
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        });
+        let res = self.send(&payload).await?;
         let mut acc = SseChatAccumulator::default();
         for_each_line(res, |line| acc.process_line(line, params.delta_tx)).await?;
         Ok(acc.finish())

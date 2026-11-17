@@ -5,3 +5,4 @@ pub mod feed;
 pub mod history;
 pub mod route;
 pub mod session;
+pub mod transcript;

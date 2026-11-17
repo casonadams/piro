@@ -1,15 +1,36 @@
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
-use crate::sys::{ProcessHandle, RunnerMsg, spawn_command};
+use serde_json::Value;
+use tokio::sync::{OnceCell, mpsc};
+
+use crate::agent::tools::{BashTool, edit_tool, read_tool, write_tool};
 
 pub struct ToolResult {
     pub output: String,
-    pub success: bool,
     pub exit_code: Option<i32>,
-    pub duration: Duration,
+}
+
+impl ToolResult {
+    pub fn ok(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            exit_code: Some(0),
+        }
+    }
+
+    pub fn err(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            exit_code: Some(1),
+        }
+    }
+
+    pub fn success(&self) -> bool {
+        self.exit_code == Some(0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,132 +39,103 @@ pub struct ToolExit {
     pub duration: Duration,
 }
 
-pub struct ToolRun {
-    pub handle: ProcessHandle,
-    pub result: JoinHandle<ToolResult>,
-}
-
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    fn run(&self, args: &str, line_tx: mpsc::UnboundedSender<String>) -> ToolRun;
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct BashTool;
-
-impl Tool for BashTool {
-    fn name(&self) -> &'static str {
-        "bash"
-    }
-
-    fn description(&self) -> &'static str {
-        "Execute a shell command in the terminal environment"
-    }
-
-    fn run(&self, args: &str, line_tx: mpsc::UnboundedSender<String>) -> ToolRun {
-        let (proc_tx, mut proc_rx) = mpsc::unbounded_channel::<RunnerMsg>();
-        let handle = spawn_command(args.to_string(), proc_tx);
-        let result = crate::sys::runtime().spawn(async move {
-            let (mut lines, mut exit_code, mut duration) = (Vec::new(), None, Duration::ZERO);
-            while let Some(msg) = proc_rx.recv().await {
-                match msg {
-                    RunnerMsg::Line(l) => {
-                        let _ = line_tx.send(l.clone());
-                        lines.push(l);
-                    }
-                    RunnerMsg::Done(code, dur) => {
-                        exit_code = code;
-                        duration = dur;
-                    }
-                }
-            }
-            ToolResult {
-                output: lines.join("\n"),
-                success: exit_code == Some(0),
-                exit_code,
-                duration,
-            }
-        });
-        ToolRun { handle, result }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
+    pub schema: Value,
 }
 
-#[derive(Default, Clone)]
+pub type ToolFuture = Pin<Box<dyn Future<Output = ToolResult> + Send>>;
+
+/// Dropping the returned future cancels the tool, so tools release processes and files on drop.
+pub trait Tool: Send + Sync {
+    fn definition(&self) -> &ToolDefinition;
+    fn read_only(&self) -> bool {
+        false
+    }
+    fn run(&self, input: Value, lines: mpsc::UnboundedSender<String>) -> ToolFuture;
+}
+
+#[derive(Debug, Clone)]
+pub struct Workspace(Arc<Mutex<PathBuf>>);
+
+impl Workspace {
+    pub fn new(cwd: PathBuf) -> Self {
+        Self(Arc::new(Mutex::new(cwd)))
+    }
+
+    pub fn cwd(&self) -> PathBuf {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    pub fn set_cwd(&self, cwd: PathBuf) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = cwd;
+    }
+
+    pub fn resolve(&self, path: &str) -> PathBuf {
+        let path = Path::new(path);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.cwd().join(path)
+        }
+    }
+}
+
+type Tools = Vec<Arc<dyn Tool>>;
+
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: Vec<Arc<dyn Tool>>,
+    tools: Tools,
+    mcp_configs: Arc<[PathBuf]>,
+    mcp: Arc<OnceCell<Tools>>,
+    pub workspace: Workspace,
 }
 
 impl ToolRegistry {
-    pub fn new() -> Self {
-        Self { tools: Vec::new() }
+    pub fn with_defaults(workspace: Workspace, mcp_configs: Vec<PathBuf>) -> Self {
+        let tools: Tools = vec![
+            Arc::new(BashTool::new(workspace.clone())),
+            Arc::new(read_tool(workspace.clone())),
+            Arc::new(write_tool(workspace.clone())),
+            Arc::new(edit_tool(workspace.clone())),
+        ];
+        Self {
+            tools,
+            mcp_configs: mcp_configs.into(),
+            mcp: Arc::default(),
+            workspace,
+        }
     }
 
-    pub fn with_defaults() -> Self {
-        let mut reg = Self::new();
-        reg.register(Arc::new(BashTool));
-        reg
+    pub async fn load_mcp(&self, notice: impl Fn(String)) {
+        let configs = self.mcp_configs.clone();
+        self.mcp
+            .get_or_init(|| async move {
+                let (tools, errors) = crate::agent::mcp::load(&configs).await;
+                errors.into_iter().for_each(notice);
+                tools
+            })
+            .await;
     }
 
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.push(tool);
+    fn all(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
+        self.tools.iter().chain(self.mcp.get().into_iter().flatten())
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.iter().find(|t| t.name() == name).cloned()
-    }
-
-    pub fn list(&self) -> &[Arc<dyn Tool>] {
-        &self.tools
+        self.all().find(|t| t.definition().name == name).cloned()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.list()
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name(),
-                description: t.description(),
-            })
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub fn format_descriptions(&self) -> String {
-        self.definitions()
-            .iter()
-            .map(|t| format!("- {}: {}", t.name, t.description))
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.all().map(|t| t.definition().clone()).collect()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_bash_tool_and_registry() {
-        let registry = ToolRegistry::with_defaults();
-        let tool = registry.get("bash").expect("bash tool missing");
-        assert_eq!(tool.name(), "bash");
-        assert!(!tool.description().is_empty());
-        assert!(registry.format_descriptions().contains("bash"));
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let run = tool.run("echo 'tool test output'", tx);
-        let mut lines = Vec::new();
-        while let Some(l) = rx.recv().await {
-            lines.push(l);
-        }
-        let res = run.result.await.expect("tool failed");
-        assert!(res.success);
-        assert_eq!(res.exit_code, Some(0));
-        assert!(res.output.contains("tool test output"));
-    }
+pub fn str_arg<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Missing string argument '{key}' in {input}"))
 }

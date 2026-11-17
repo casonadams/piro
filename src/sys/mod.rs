@@ -8,4 +8,4 @@ pub mod signals;
 pub mod terminal;
 
 pub use rt::runtime;
-pub use runner::{ProcessHandle, RunnerMsg, spawn_command};
+pub use runner::{ProcessHandle, RunnerMsg, ShellJob, spawn_command};

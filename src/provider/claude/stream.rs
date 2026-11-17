@@ -6,9 +6,10 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use super::request::from_claude_tool_name;
-use crate::agent::react::AgentEvent;
+use crate::agent::AgentEvent;
 use crate::agent::{AssistantTurn, Thinking, ToolCall};
 use crate::provider::sse::{Flow, data_payload};
+use crate::provider::{Reply, Usage, tool_input};
 
 struct PendingTool {
     id: String,
@@ -23,6 +24,8 @@ pub struct StreamAccumulator {
     signature: Option<String>,
     text: String,
     tool_calls: Vec<ToolCall>,
+    usage: Usage,
+    stop_reason: Option<String>,
 }
 
 impl StreamAccumulator {
@@ -37,6 +40,8 @@ impl StreamAccumulator {
         let event: Value =
             serde_json::from_str(payload).map_err(|e| format!("Failed to parse Claude stream event: {e}"))?;
         match event["type"].as_str() {
+            Some("message_start") => self.message_start(&event["message"]["usage"]),
+            Some("message_delta") => self.message_delta(&event),
             Some("content_block_start") => self.block_start(&event),
             Some("content_block_delta") => self.block_delta(&event, delta_tx),
             Some("content_block_stop") => self.block_stop(&event),
@@ -48,6 +53,26 @@ impl StreamAccumulator {
             _ => {}
         }
         Ok(Flow::More)
+    }
+
+    fn message_start(&mut self, usage: &Value) {
+        let count = |key: &str| usage[key].as_u64().unwrap_or_default();
+        self.usage = Usage {
+            input: count("input_tokens"),
+            output: count("output_tokens"),
+            cache_read: count("cache_read_input_tokens"),
+            cache_write: count("cache_creation_input_tokens"),
+        };
+    }
+
+    /// `message_delta` usage counts output tokens cumulatively.
+    fn message_delta(&mut self, event: &Value) {
+        if let Some(output) = event["usage"]["output_tokens"].as_u64() {
+            self.usage.output = output;
+        }
+        if let Some(reason) = event["delta"]["stop_reason"].as_str() {
+            self.stop_reason = Some(reason.to_owned());
+        }
     }
 
     fn block_start(&mut self, event: &Value) {
@@ -98,11 +123,11 @@ impl StreamAccumulator {
         self.tool_calls.push(ToolCall {
             id: tool.id,
             name: tool.name,
-            input: command_input(&tool.json),
+            input: tool_input(&tool.json),
         });
     }
 
-    pub fn finish(self) -> AssistantTurn {
+    pub fn finish(self) -> Reply {
         let thinking = if self.thinking.trim().is_empty() && self.signature.is_none() {
             None
         } else {
@@ -111,10 +136,14 @@ impl StreamAccumulator {
                 signature: self.signature,
             })
         };
-        AssistantTurn {
-            thinking,
-            text: (!self.text.trim().is_empty()).then_some(self.text),
-            tool_calls: self.tool_calls,
+        Reply {
+            turn: AssistantTurn {
+                thinking,
+                text: (!self.text.trim().is_empty()).then_some(self.text),
+                tool_calls: self.tool_calls,
+            },
+            usage: self.usage,
+            truncated: self.stop_reason.as_deref() == Some("max_tokens"),
         }
     }
 }
@@ -123,12 +152,4 @@ fn send(tx: Option<&mpsc::UnboundedSender<AgentEvent>>, event: AgentEvent) {
     if let Some(tx) = tx {
         let _ = tx.send(event);
     }
-}
-
-/// The bash tool takes a `command` field; anything else is passed through verbatim.
-fn command_input(raw: &str) -> String {
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|v| v["command"].as_str().map(String::from))
-        .unwrap_or_else(|| raw.to_string())
 }

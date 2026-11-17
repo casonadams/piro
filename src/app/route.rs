@@ -2,6 +2,8 @@
 pub enum InputIntent {
     Clear,
     Login,
+    Compact,
+    Model(Option<String>),
     DirectCommand(String),
     CommandWithAgent(String),
     AgentPrompt(String),
@@ -23,7 +25,11 @@ fn slash_command(input: &str) -> Option<InputIntent> {
     match input {
         "/clear" => Some(InputIntent::Clear),
         "/login" | "/login claude" => Some(InputIntent::Login),
-        _ => None,
+        "/compact" => Some(InputIntent::Compact),
+        "/model" => Some(InputIntent::Model(None)),
+        _ => input
+            .strip_prefix("/model ")
+            .map(|spec| InputIntent::Model(Some(spec.trim().to_owned()))),
     }
 }
 
@@ -111,6 +117,16 @@ mod tests {
             parse_input_intent("/clearly"),
             Some(InputIntent::AgentPrompt("/clearly".into()))
         );
+    }
+
+    #[test]
+    fn model_and_compact_slash_commands() {
+        assert_eq!(parse_input_intent("/model"), Some(InputIntent::Model(None)));
+        assert_eq!(
+            parse_input_intent("/model  claude/opus "),
+            Some(InputIntent::Model(Some("claude/opus".into())))
+        );
+        assert_eq!(parse_input_intent("/compact"), Some(InputIntent::Compact));
     }
 
     #[test]

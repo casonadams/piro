@@ -14,44 +14,54 @@
 src/
 ├── main.rs       # CLI entry: `piro login`, model validation, launch options, sys::host::run
 ├── lib.rs        # Modules, `pub use ui::App`, #[native_module] registry for NSH
-├── launch.rs     # LaunchOptions set by the binary; model_spec() for the root
+├── launch.rs     # LaunchOptions set by the binary; session_config() for the root (data dir only when launched)
 ├── app/          # Session domain, no NSH types (unit-testable)
-│   ├── session.rs# Session state, submit routing, cancel, busy guard, UiRequest
-│   ├── apply.rs  # Applying AgentEvent / RunnerMsg to the session
+│   ├── session.rs# Session state, submit routing, cancel, busy guard, approvals, /model, UiRequest
+│   ├── apply.rs  # Applying AgentEvent / RunnerMsg to the session; replay of a resumed conversation
 │   ├── channels.rs# Agent/runner channels; reset() drops queued messages of cancelled work
 │   ├── feed.rs   # Feed model: cards, command blocks, streamed agent slots
 │   ├── history.rs# Prompt history (~/.piro/history), caret helpers
-│   ├── route.rs  # parse_input_intent: !!cmd, !cmd, prompts, /clear, /login
-│   └── cli.rs    # Argument parsing (--model, `login [provider]`)
+│   ├── transcript.rs# Saved conversations (~/.piro/sessions/*.jsonl), resume of the latest per cwd
+│   ├── route.rs  # parse_input_intent: !!cmd, !cmd, prompts, /clear, /login, /model, /compact
+│   └── cli.rs    # Argument parsing (--model, --continue, --yolo, `login [provider]`)
 ├── ui/           # NSH components
-│   ├── mod.rs    # App root: feed, spacer row, composer, login dialog, footer
+│   ├── mod.rs    # App root: feed, spacer row, composer, login and approval dialogs, footer
 │   ├── bridge.rs # Ui: session behind Rc<RefCell>, mirrored into signals; inbox drain task
 │   ├── feed.rs / card_text.rs # Virtual list of cards; pure card text and accents
 │   ├── composer.rs # Multiline field between text rules, focus on first layout, history keys
 │   ├── keys.rs   # Global and busy-only keymaps
 │   ├── login.rs  # /login dialog: authorize URL, pasted code, Claude Code import
-│   ├── footer.rs / palette.rs
+│   ├── approval.rs # Tool call approval dialog: y / a / n
+│   ├── footer.rs # Status badge, model, token counts / palette.rs
 │   └── headless_tests.rs # nsh-testing headless UI tests
 ├── sys/          # OS, process and terminal host
 │   ├── host.rs   # Standalone AppView host loop (run_app), ~/.piro data dir and log
 │   ├── terminal.rs (+ caps.rs, input.rs) # Session modes, capability detection, crossterm -> NSH Input
 │   ├── clipboard.rs # NSH ClipboardBackend: OSC 52 between frames (+ pbcopy on macOS)
 │   ├── rt.rs     # Process-wide tokio runtime
-│   ├── runner.rs # $SHELL -c subprocesses, process groups, kill
+│   ├── runner.rs # Shell subprocesses ($SHELL, or bash for the agent), process groups, kill
 │   └── signals.rs / filelog.rs
 ├── agent/        # ReAct loop
-│   ├── message.rs# AgentMessage, AssistantTurn, ToolCall (ids), close_dangling_tool_calls
-│   ├── react.rs  # ReActEngine: whole turns, all tool calls per turn, Committed events, hooks
-│   └── tool.rs   # Tool trait, BashTool, ToolRegistry, ToolExit
+│   ├── message.rs# AgentMessage, AssistantTurn, ToolCall (JSON input), close_dangling_tool_calls
+│   ├── event.rs  # AgentEvent, ApprovalRequest, AgentHandle (cancel = abort, dropping the running tool)
+│   ├── react.rs  # ReActEngine: whole turns, retries, approvals, truncation, Committed events
+│   ├── limits.rs # Step limit (PIRO_MAX_STEPS), repetition guard
+│   ├── observation.rs # What the model sees of tool output: line and byte caps
+│   ├── prompt.rs # System prompt: environment, ~/.piro/AGENTS.md, AGENTS.md/CLAUDE.md root to cwd
+│   ├── compact.rs# Summarizing the conversation at PIRO_COMPACT_AT context tokens, and /compact
+│   ├── subagent.rs # `task` tool: a subagent with fresh context, one level deep
+│   ├── mcp.rs    # MCP stdio client: ~/.piro/mcp.json and .mcp.json servers as mcp__<server>__<tool>
+│   ├── tool.rs   # Tool trait (JSON schema, read_only), ToolRegistry, Workspace (shared cwd)
+│   └── tools/    # bash (timeout, cwd tracking), read / write / edit
 ├── auth/         # Credentials
 │   ├── store.rs  # ~/.piro/auth.json, atomic 0600 writes
 │   ├── pkce.rs   # PKCE S256 + state
 │   ├── login.rs  # Blocking `piro login` flow
 │   └── claude/   # Claude OAuth: authorize/exchange/refresh, Claude Code credential import
 └── provider/     # LLM providers
-    ├── mod.rs    # LlmProvider trait, AnyProvider, model spec routing
+    ├── mod.rs    # LlmProvider trait, Reply (usage, truncated), ProviderError (retryable), spec routing
     ├── sse.rs    # UTF-8 safe SSE line decoder shared by providers
-    ├── http.rs   # Shared reqwest client
+    ├── http.rs   # Shared reqwest client, retryable statuses, retry-after
     ├── openai.rs # OpenAI-compatible adapter (Ollama, OpenAI, OpenRouter, DeepSeek, Groq)
     └── claude/   # Anthropic Messages API: claude/ (OAuth) and anthropic/ (API key)
 ```
@@ -82,7 +92,9 @@ src/
   - `!!<cmd>`: Direct shell execution (bypasses agent).
   - `!<cmd>`: Runs shell command and feeds output to the ReAct agent context.
   - `<prompt>` (unprefixed): Starts the ReAct agent loop.
-  - `/clear`: Clears the feed and agent context. `/login`: Claude sign-in dialog.
+  - `/clear`: Clears the feed and starts a new conversation. `/login`: Claude sign-in dialog.
+  - `/model [provider/model]`: Shows or switches the model. `/compact`: Summarizes the conversation.
+- **Approvals**: tools that are not read-only (`bash`, `write`, `edit`, MCP tools without `readOnlyHint`) ask first: `y` allows, `a` allows the tool for the session, `n` denies. `--yolo` skips asking.
 - **Composer** (NSH text field): readline keys come from NSH. Enter submits; `Ctrl+J`, `Shift+Enter` and `Alt+Enter` insert a newline. `Up`/`Down` (`Ctrl+P`/`Ctrl+N`) recall history from the first/last line.
 - **Global**: `Ctrl+O` toggles the latest output block. `Ctrl+L` clears.
 - **Busy**: `Esc` / `Ctrl+C` cancel the running command or agent turn. When idle, NSH defaults apply: `Ctrl+C` copies a selection, or quits without one.

@@ -1,6 +1,8 @@
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CliArgs {
     pub model: Option<String>,
+    pub resume: bool,
+    pub auto_approve: bool,
     pub command: Option<Command>,
 }
 
@@ -10,7 +12,7 @@ pub enum Command {
 }
 
 pub fn print_help() -> &'static str {
-    "Usage: piro [OPTIONS]\n       piro login [PROVIDER]\n\nCommands:\n  login [PROVIDER]              Sign in and store credentials in ~/.piro/auth.json (default: claude)\n\nOptions:\n  -m, --model <PROVIDER/MODEL>  Model in format <provider>/<model> (e.g. ollama/ornith-1.5:35b, openai/gpt-4o, claude/claude-sonnet-4-6, anthropic/claude-sonnet-4-6)\n  -h, --help                    Print help\n"
+    "Usage: piro [OPTIONS]\n       piro login [PROVIDER]\n\nCommands:\n  login [PROVIDER]              Sign in and store credentials in ~/.piro/auth.json (default: claude)\n\nOptions:\n  -m, --model <PROVIDER/MODEL>  Model in format <provider>/<model> (e.g. ollama/ornith-1.5:35b, openai/gpt-4o, claude/claude-sonnet-4-6, anthropic/claude-sonnet-4-6)\n  -c, --continue                Continue the latest conversation in this directory\n      --yolo                    Run every tool call without asking\n  -h, --help                    Print help\n"
 }
 
 fn parse_model_arg(arg: &str, iter: &mut impl Iterator<Item = String>) -> Result<String, String> {
@@ -32,15 +34,16 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliArgs, St
         iter.next();
         return parse_login(iter);
     }
-    let mut model = None;
+    let mut parsed = CliArgs::default();
     while let Some(arg) = iter.next() {
-        if arg == "-h" || arg == "--help" {
-            return Err(print_help().to_string());
+        match arg.as_str() {
+            "-h" | "--help" => return Err(print_help().to_string()),
+            "-c" | "--continue" => parsed.resume = true,
+            "--yolo" => parsed.auto_approve = true,
+            _ => parsed.model = Some(parse_model_arg(&arg, &mut iter)?),
         }
-        let val = parse_model_arg(&arg, &mut iter)?;
-        model = Some(val);
     }
-    Ok(CliArgs { model, command: None })
+    Ok(parsed)
 }
 
 fn parse_login(rest: impl Iterator<Item = String>) -> Result<CliArgs, String> {
@@ -56,8 +59,8 @@ fn parse_login(rest: impl Iterator<Item = String>) -> Result<CliArgs, String> {
     }
     let provider = provider.unwrap_or_else(|| "claude".to_string());
     Ok(CliArgs {
-        model: None,
         command: Some(Command::Login { provider }),
+        ..Default::default()
     })
 }
 
@@ -78,6 +81,14 @@ mod tests {
         let args_eq = vec!["piro".into(), "--model=ollama/qwen".into()];
         let parsed_eq = parse_args(args_eq).unwrap();
         assert_eq!(parsed_eq.model.as_deref(), Some("ollama/qwen"));
+    }
+
+    #[test]
+    fn parses_continue_and_yolo_flags() {
+        let parsed = parse_args(["piro", "-c", "--yolo", "-m", "openai/gpt-4o"].map(String::from)).unwrap();
+        assert!(parsed.resume && parsed.auto_approve);
+        assert_eq!(parsed.model.as_deref(), Some("openai/gpt-4o"));
+        assert!(!parse_args(["piro"].map(String::from)).unwrap().resume);
     }
 
     #[test]
